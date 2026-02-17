@@ -268,6 +268,20 @@ export default function Home() {
     }
   }
 
+  async function createNewIdentity() {
+    const confirmed = window.confirm(
+      "Create a new guest identity? Your old sessions will remain in the database, but this user will not be able to see them."
+    );
+    if (!confirmed) {
+      return;
+    }
+    await bootstrapAuth(true);
+    setBaseline(null);
+    setScenarioResults([]);
+    setComparison(null);
+    setRecentSessions([]);
+  }
+
   function authHeaders() {
     if (!auth?.token) {
       throw new Error("Authentication not ready. Try Refresh Identity.");
@@ -467,6 +481,9 @@ export default function Home() {
           Lightweight auth enabled with per-user session ownership.
         </p>
         <div className="hero-actions">
+          <Link className="chip-link" href="/user-guide">
+            Student User Guide
+          </Link>
           <Link className="chip-link" href="/how-it-works">
             How The Formula Works (Student Version)
           </Link>
@@ -476,10 +493,14 @@ export default function Home() {
       <section className="card">
         <div className="section-head">
           <h2>Identity</h2>
-          <button className="ghost" onClick={() => bootstrapAuth(true)} disabled={authLoading}>
-            {authLoading ? "Refreshing..." : "Refresh Identity"}
+          <button className="ghost" onClick={createNewIdentity} disabled={authLoading}>
+            {authLoading ? "Working..." : "Create New Guest Identity"}
           </button>
         </div>
+        <p className="subtitle">
+          Think of identity like your locker key. This key decides which saved sessions you
+          can open.
+        </p>
         {authLoading ? (
           <p className="subtitle">Initializing guest identity...</p>
         ) : auth ? (
@@ -500,6 +521,10 @@ export default function Home() {
         ) : (
           <p className="error">{authError || "Unable to initialize auth"}</p>
         )}
+        <p className="identity-warning">
+          If you create a new guest identity, your previous sessions will not show up for
+          this new identity.
+        </p>
       </section>
 
       <section className="card">

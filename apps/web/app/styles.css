@@ -267,6 +267,16 @@ ul {
   color: #0f3f3b;
 }
 
+.identity-warning {
+  margin: 12px 0 0 0;
+  padding: 10px 12px;
+  border-left: 4px solid #b45309;
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #78350f;
+  font-size: 0.92rem;
+}
+
 .explain-page .card p {
   line-height: 1.5;
 }
@@ -361,6 +371,34 @@ ul {
   color: #136030;
 }
 
+.guide-list {
+  margin: 0;
+  padding-left: 20px;
+  line-height: 1.6;
+}
+
+.guide-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.guide-item {
+  border: 1px solid #d9d1bf;
+  border-radius: 10px;
+  padding: 12px;
+  background: #fffdf8;
+}
+
+.guide-item h3 {
+  margin: 0 0 8px 0;
+  font-size: 1rem;
+}
+
+.guide-item p {
+  margin: 0;
+}
+
 @media (max-width: 900px) {
   .grid-scenario {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -383,6 +421,10 @@ ul {
   }
 
   .trend-band {
+    grid-template-columns: 1fr;
+  }
+
+  .guide-grid {
     grid-template-columns: 1fr;
   }
 }
