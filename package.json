@@ -1,0 +1,17 @@
+{
+  "name": "digital-twin-platform",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace @digital-twin/web run dev",
+    "build:web": "npm --workspace @digital-twin/web run build",
+    "start:web": "npm --workspace @digital-twin/web run start",
+    "dev:api": "npm --workspace @digital-twin/api run dev",
+    "start:api": "npm --workspace @digital-twin/api run start"
+  }
+}
+
