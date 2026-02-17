@@ -55,11 +55,10 @@ export default function HowItWorksPage() {
   return (
     <main className="page explain-page">
       <section className="card">
-        <p className="badge">Student Explain Mode</p>
+        <p className="badge">Formula Overview</p>
         <h1>How Our Health Trend Formula Works</h1>
         <p className="subtitle">
-          This page is written for a 9th grade class demo. You can explain this to a
-          teacher as: "It is a weighted score model, not a medical diagnosis model."
+          This page explains the exact scoring logic used by the application.
         </p>
         <div className="hero-actions">
           <Link className="chip-link" href="/">
@@ -75,11 +74,10 @@ export default function HowItWorksPage() {
           <strong>1</strong>. Then we combine those scores using weights.
         </p>
         <pre className="formula-block">
-{`relativeScore = 100 × weighted_sum(factorScores)`}
+{`relativeScore = 100 x weighted_sum(factorScores)`}
         </pre>
         <p className="subtitle">
-          Higher score = better relative trend. It is educational and does not diagnose
-          disease.
+          Higher score means a better relative trend.
         </p>
       </section>
 
@@ -146,16 +144,14 @@ export default function HowItWorksPage() {
 
       <section className="card">
         <h2>4) Trend Rules</h2>
-        <p>
-          We compare the scenario score to the baseline score:
-        </p>
+        <p>We compare the scenario score to the baseline score:</p>
         <pre className="formula-block">
 {`delta = scenarioScore - baselineScore`}
         </pre>
         <div className="trend-band">
-          <div className="trend-box trend-down">delta ≤ -3.0 : Declining</div>
+          <div className="trend-box trend-down">delta {"<="} -3.0 : Declining</div>
           <div className="trend-box trend-flat">-3.0 &lt; delta &lt; +3.0 : Stable</div>
-          <div className="trend-box trend-up">delta ≥ +3.0 : Improving</div>
+          <div className="trend-box trend-up">delta {">="} +3.0 : Improving</div>
         </div>
       </section>
 
@@ -187,10 +183,12 @@ export default function HowItWorksPage() {
           </table>
         </div>
 
-        <p className="subtitle">Now test a scenario score: <strong>{scenarioScore}</strong></p>
+        <p className="subtitle">
+          Now test a scenario score: <strong>{scenarioScore}</strong>
+        </p>
         <pre className="formula-block">
 {`delta = ${scenarioScore} - ${exampleScore} = ${delta}
-deviationPercent = |delta| / baseline × 100
+deviationPercent = |delta| / baseline x 100
 deviationPercent = ${deviation}%`}
         </pre>
         <p>
@@ -199,18 +197,17 @@ deviationPercent = ${deviation}%`}
       </section>
 
       <section className="card">
-        <h2>6) What To Tell Your Teacher</h2>
+        <h2>6) Key Notes</h2>
         <ul>
-          <li>This is a weighted math model for learning.</li>
+          <li>This is a weighted math model for educational use.</li>
           <li>Inputs are self-reported categories and hours.</li>
           <li>Output is a relative trend score, not a diagnosis.</li>
           <li>What-if scenarios help compare habits before real-world choices.</li>
         </ul>
         <p className="notice">
-          Educational simulation only. No diagnosis, treatment advice, or prescriptions.
+          This tool does not provide clinical diagnosis, treatment advice, or prescriptions.
         </p>
       </section>
     </main>
   );
 }
-

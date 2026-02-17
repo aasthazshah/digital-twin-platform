@@ -482,10 +482,10 @@ export default function Home() {
         </p>
         <div className="hero-actions">
           <Link className="chip-link" href="/user-guide">
-            Student User Guide
+            User Guide
           </Link>
           <Link className="chip-link" href="/how-it-works">
-            How The Formula Works (Student Version)
+            How The Formula Works
           </Link>
         </div>
       </div>
