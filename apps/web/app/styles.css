@@ -34,6 +34,29 @@ body {
   padding: 8px 4px 6px 4px;
 }
 
+.hero-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.chip-link {
+  display: inline-block;
+  border: 1px solid var(--accent);
+  color: var(--accent-dark);
+  background: #ecfdf9;
+  text-decoration: none;
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.chip-link:hover {
+  background: #d9f3ef;
+}
+
 .badge {
   display: inline-block;
   margin: 0 0 10px 0;
@@ -244,6 +267,100 @@ ul {
   color: #0f3f3b;
 }
 
+.explain-page .card p {
+  line-height: 1.5;
+}
+
+.formula-block {
+  margin: 10px 0;
+  background: #f7f3e8;
+  border: 1px solid #d9d1bf;
+  border-radius: 10px;
+  padding: 12px;
+  overflow-x: auto;
+  font-size: 0.92rem;
+}
+
+.weight-chart {
+  display: grid;
+  gap: 10px;
+}
+
+.weight-row {
+  display: grid;
+  grid-template-columns: 190px 1fr 56px;
+  gap: 10px;
+  align-items: center;
+}
+
+.weight-label {
+  font-size: 0.92rem;
+  color: var(--muted);
+}
+
+.weight-track {
+  height: 12px;
+  background: #ece8dd;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.weight-fill {
+  height: 100%;
+  border-radius: 999px;
+}
+
+.weight-value {
+  text-align: right;
+  font-size: 0.9rem;
+  color: #2b2f39;
+}
+
+.graph-box {
+  overflow-x: auto;
+}
+
+.sleep-svg {
+  width: 100%;
+  min-width: 520px;
+  max-width: 680px;
+  display: block;
+}
+
+.svg-text {
+  font-size: 11px;
+  fill: #374151;
+}
+
+.trend-band {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid #d9d1bf;
+}
+
+.trend-box {
+  padding: 12px;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.trend-down {
+  background: #fee4e2;
+  color: #912018;
+}
+
+.trend-flat {
+  background: #fef4d8;
+  color: #805b00;
+}
+
+.trend-up {
+  background: #dcfae6;
+  color: #136030;
+}
+
 @media (max-width: 900px) {
   .grid-scenario {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -259,5 +376,13 @@ ul {
   .scenario-head {
     flex-direction: column;
   }
-}
 
+  .weight-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .trend-band {
+    grid-template-columns: 1fr;
+  }
+}

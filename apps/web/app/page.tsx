@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 type Trend = "improving" | "stable" | "declining";
@@ -465,6 +466,11 @@ export default function Home() {
         <p className="subtitle">
           Lightweight auth enabled with per-user session ownership.
         </p>
+        <div className="hero-actions">
+          <Link className="chip-link" href="/how-it-works">
+            How The Formula Works (Student Version)
+          </Link>
+        </div>
       </div>
 
       <section className="card">
@@ -857,4 +863,3 @@ export default function Home() {
     </main>
   );
 }
-
