@@ -16,6 +16,7 @@ type LifestyleInput = {
 };
 
 type BaselineState = {
+  sessionId?: string;
   baselineId: string;
   input: LifestyleInput;
   relativeScore: number;
@@ -59,6 +60,25 @@ type ScenarioDraft = {
   dietCategory: string;
   medicationAdherence: string;
   stressLevel: string;
+};
+
+type SessionSummary = {
+  sessionId: string;
+  baselineScore: number | null;
+  scenarioCount: number;
+  hasComparison: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type StoredSession = {
+  sessionId: string;
+  baseline: BaselineState | null;
+  scenarioResults: ScenarioResult[];
+  comparison: ComparisonResult | null;
+  createdAt: string;
+  updatedAt: string;
+  disclaimer: string;
 };
 
 const AGE_RANGES = ["13-17", "18-25", "26-35", "36-45", "46-55", "56-65", "66+"];
@@ -107,11 +127,14 @@ export default function Home() {
   const [baseline, setBaseline] = useState<BaselineState | null>(null);
   const [scenarioResults, setScenarioResults] = useState<ScenarioResult[]>([]);
   const [comparison, setComparison] = useState<ComparisonResult | null>(null);
+  const [recentSessions, setRecentSessions] = useState<SessionSummary[]>([]);
   const [disclaimer, setDisclaimer] = useState<string>(
     "Educational simulation only. This app does not provide medical diagnosis, treatment, or prescriptions."
   );
   const [loadingBaseline, setLoadingBaseline] = useState(false);
   const [loadingScenarios, setLoadingScenarios] = useState(false);
+  const [loadingRecent, setLoadingRecent] = useState(false);
+  const [loadingSessionId, setLoadingSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const scenarioCountText = useMemo(
@@ -185,6 +208,7 @@ export default function Home() {
       setDisclaimer(data.disclaimer || disclaimer);
       setScenarioResults([]);
       setComparison(null);
+      await fetchRecentSessions();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to generate baseline");
     } finally {
@@ -260,6 +284,7 @@ export default function Home() {
       const compareData: ComparisonResult = await compareResponse.json();
       setComparison(compareData);
       setDisclaimer(compareData.disclaimer || disclaimer);
+      await fetchRecentSessions();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to run scenarios");
     } finally {
@@ -267,13 +292,55 @@ export default function Home() {
     }
   }
 
+  async function fetchRecentSessions() {
+    setLoadingRecent(true);
+    try {
+      const response = await fetch(`${API_BASE}/v1/sessions?limit=10`);
+      if (!response.ok) {
+        return;
+      }
+
+      const data = await response.json();
+      if (Array.isArray(data.items)) {
+        setRecentSessions(data.items);
+      }
+    } catch (_error) {
+      // ignore optional fetch errors in UI flow
+    } finally {
+      setLoadingRecent(false);
+    }
+  }
+
+  async function loadSession(sessionId: string) {
+    setLoadingSessionId(sessionId);
+    setError(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/v1/sessions/${sessionId}`);
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.message || "Failed to load session");
+      }
+
+      const session: StoredSession = await response.json();
+      setBaseline(session.baseline);
+      setScenarioResults(Array.isArray(session.scenarioResults) ? session.scenarioResults : []);
+      setComparison(session.comparison || null);
+      setDisclaimer(session.disclaimer || disclaimer);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load session");
+    } finally {
+      setLoadingSessionId(null);
+    }
+  }
+
   return (
     <main className="page">
       <div className="hero">
-        <p className="badge">MVP Ready</p>
+        <p className="badge">Phase 2</p>
         <h1>Personalized Digital Twin Health App</h1>
         <p className="subtitle">
-          Generate a baseline health trend and compare multiple what-if scenarios.
+          Baseline/scenario simulation with session persistence and reload support.
         </p>
       </div>
 
@@ -533,10 +600,8 @@ export default function Home() {
               <p className="value cap">{baseline.trendLabel}</p>
             </div>
             <div className="result-box">
-              <p className="label">Generated</p>
-              <p className="value small">
-                {new Date(baseline.generatedAt).toLocaleString()}
-              </p>
+              <p className="label">Session ID</p>
+              <p className="value small">{baseline.sessionId || "n/a"}</p>
             </div>
           </div>
         </section>
@@ -561,7 +626,9 @@ export default function Home() {
                   <tr key={row.scenarioId}>
                     <td>{row.scenarioName}</td>
                     <td>{typeof row.relativeScore === "number" ? row.relativeScore : "-"}</td>
-                    <td>{typeof row.deltaFromBaseline === "number" ? row.deltaFromBaseline : "-"}</td>
+                    <td>
+                      {typeof row.deltaFromBaseline === "number" ? row.deltaFromBaseline : "-"}
+                    </td>
                     <td>
                       {typeof row.deviationPercent === "number" ? row.deviationPercent : "-"}
                     </td>
@@ -585,6 +652,52 @@ export default function Home() {
           </ul>
         </section>
       ) : null}
+
+      <section className="card">
+        <div className="section-head">
+          <h2>6) Saved Sessions</h2>
+          <button className="ghost" onClick={fetchRecentSessions} disabled={loadingRecent}>
+            {loadingRecent ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
+
+        {recentSessions.length === 0 ? (
+          <p className="subtitle">No saved sessions found yet.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Session</th>
+                  <th>Baseline</th>
+                  <th>Scenarios</th>
+                  <th>Updated</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentSessions.map((item) => (
+                  <tr key={item.sessionId}>
+                    <td>{item.sessionId}</td>
+                    <td>{item.baselineScore ?? "-"}</td>
+                    <td>{item.scenarioCount}</td>
+                    <td>{new Date(item.updatedAt).toLocaleString()}</td>
+                    <td>
+                      <button
+                        className="ghost"
+                        onClick={() => loadSession(item.sessionId)}
+                        disabled={loadingSessionId === item.sessionId}
+                      >
+                        {loadingSessionId === item.sessionId ? "Loading..." : "Load"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
 
       <section className="card">
         <p className="notice">{disclaimer}</p>

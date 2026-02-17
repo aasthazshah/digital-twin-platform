@@ -1,9 +1,14 @@
 import cors from "cors";
 import express from "express";
+import pg from "pg";
+
+const { Pool } = pg;
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
 const corsOrigin = process.env.CORS_ORIGIN || "*";
+const databaseUrl = process.env.DATABASE_URL || "";
+const databaseSsl = String(process.env.DATABASE_SSL || "").toLowerCase() === "true";
 
 app.use(
   cors({
@@ -16,7 +21,7 @@ app.use(
             .filter(Boolean)
   })
 );
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 const DISCLAIMER =
   "Educational simulation only. This app does not provide medical diagnosis, treatment, or prescriptions.";
@@ -78,6 +83,10 @@ const baseWeights = {
   medicationAdherence: 0.03,
   stressLevel: 0.02
 };
+
+function makeId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
 
 function sleepFactor(sleepHours) {
   const distance = Math.abs(8 - sleepHours);
@@ -154,120 +163,445 @@ function trendFromDelta(delta) {
   return "stable";
 }
 
-app.get("/health", (_req, res) => {
-  res.json({ ok: true });
+function normalizeSession(record) {
+  const created =
+    record.createdAt ||
+    (record.created_at && typeof record.created_at.toISOString === "function"
+      ? record.created_at.toISOString()
+      : record.created_at);
+  const updated =
+    record.updatedAt ||
+    (record.updated_at && typeof record.updated_at.toISOString === "function"
+      ? record.updated_at.toISOString()
+      : record.updated_at);
+
+  return {
+    sessionId: record.sessionId || record.session_id,
+    baseline: record.baseline ?? null,
+    scenarioResults: record.scenarioResults || record.scenario_results || [],
+    comparison: record.comparison ?? null,
+    createdAt: created || new Date().toISOString(),
+    updatedAt: updated || new Date().toISOString()
+  };
+}
+
+function createMemoryStorage(kind = "memory") {
+  const sessions = new Map();
+
+  return {
+    kind,
+    async init() {},
+    async ping() {
+      return { ok: true };
+    },
+    async saveBaseline(sessionId, baseline) {
+      const existing = sessions.get(sessionId);
+      const now = new Date().toISOString();
+      sessions.set(sessionId, {
+        sessionId,
+        baseline,
+        scenarioResults: existing?.scenarioResults || [],
+        comparison: existing?.comparison || null,
+        createdAt: existing?.createdAt || now,
+        updatedAt: now
+      });
+    },
+    async saveScenarioResults(sessionId, baseline, scenarioResults) {
+      const existing = sessions.get(sessionId);
+      const now = new Date().toISOString();
+      sessions.set(sessionId, {
+        sessionId,
+        baseline: baseline || existing?.baseline || null,
+        scenarioResults: Array.isArray(scenarioResults) ? scenarioResults : [],
+        comparison: existing?.comparison || null,
+        createdAt: existing?.createdAt || now,
+        updatedAt: now
+      });
+    },
+    async saveComparison(sessionId, baseline, scenarioResults, comparison) {
+      const existing = sessions.get(sessionId);
+      const now = new Date().toISOString();
+      sessions.set(sessionId, {
+        sessionId,
+        baseline: baseline || existing?.baseline || null,
+        scenarioResults:
+          (Array.isArray(scenarioResults) && scenarioResults) ||
+          existing?.scenarioResults ||
+          [],
+        comparison: comparison || null,
+        createdAt: existing?.createdAt || now,
+        updatedAt: now
+      });
+    },
+    async getSession(sessionId) {
+      return sessions.get(sessionId) || null;
+    },
+    async listSessions(limit = 20) {
+      return Array.from(sessions.values())
+        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+        .slice(0, limit);
+    }
+  };
+}
+
+function createPostgresStorage() {
+  const pool = new Pool({
+    connectionString: databaseUrl,
+    ssl: databaseSsl ? { rejectUnauthorized: false } : undefined
+  });
+
+  return {
+    kind: "postgres",
+    async init() {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS twin_sessions (
+          session_id TEXT PRIMARY KEY,
+          baseline JSONB NOT NULL,
+          scenario_results JSONB NOT NULL DEFAULT '[]'::jsonb,
+          comparison JSONB,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_twin_sessions_updated_at
+        ON twin_sessions(updated_at DESC)
+      `);
+    },
+    async ping() {
+      await pool.query("SELECT 1");
+      return { ok: true };
+    },
+    async saveBaseline(sessionId, baseline) {
+      await pool.query(
+        `
+        INSERT INTO twin_sessions (session_id, baseline)
+        VALUES ($1, $2::jsonb)
+        ON CONFLICT (session_id)
+        DO UPDATE SET
+          baseline = EXCLUDED.baseline,
+          updated_at = NOW()
+      `,
+        [sessionId, JSON.stringify(baseline)]
+      );
+    },
+    async saveScenarioResults(sessionId, baseline, scenarioResults) {
+      await pool.query(
+        `
+        INSERT INTO twin_sessions (session_id, baseline, scenario_results)
+        VALUES ($1, $2::jsonb, $3::jsonb)
+        ON CONFLICT (session_id)
+        DO UPDATE SET
+          baseline = EXCLUDED.baseline,
+          scenario_results = EXCLUDED.scenario_results,
+          updated_at = NOW()
+      `,
+        [sessionId, JSON.stringify(baseline || {}), JSON.stringify(scenarioResults || [])]
+      );
+    },
+    async saveComparison(sessionId, baseline, scenarioResults, comparison) {
+      await pool.query(
+        `
+        INSERT INTO twin_sessions (session_id, baseline, scenario_results, comparison)
+        VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb)
+        ON CONFLICT (session_id)
+        DO UPDATE SET
+          baseline = EXCLUDED.baseline,
+          scenario_results = EXCLUDED.scenario_results,
+          comparison = EXCLUDED.comparison,
+          updated_at = NOW()
+      `,
+        [
+          sessionId,
+          JSON.stringify(baseline || {}),
+          JSON.stringify(scenarioResults || []),
+          JSON.stringify(comparison || null)
+        ]
+      );
+    },
+    async getSession(sessionId) {
+      const result = await pool.query(
+        `
+        SELECT session_id, baseline, scenario_results, comparison, created_at, updated_at
+        FROM twin_sessions
+        WHERE session_id = $1
+      `,
+        [sessionId]
+      );
+
+      if (result.rowCount === 0) {
+        return null;
+      }
+
+      return normalizeSession(result.rows[0]);
+    },
+    async listSessions(limit = 20) {
+      const result = await pool.query(
+        `
+        SELECT session_id, baseline, scenario_results, comparison, created_at, updated_at
+        FROM twin_sessions
+        ORDER BY updated_at DESC
+        LIMIT $1
+      `,
+        [limit]
+      );
+
+      return result.rows.map((row) => normalizeSession(row));
+    }
+  };
+}
+
+async function buildStorage() {
+  if (!databaseUrl) {
+    return createMemoryStorage("memory_no_database_url");
+  }
+
+  const candidate = createPostgresStorage();
+  try {
+    await candidate.init();
+    return candidate;
+  } catch (error) {
+    console.error("Postgres init failed, falling back to memory storage.", error);
+    return createMemoryStorage("memory_postgres_init_failed");
+  }
+}
+
+const storage = await buildStorage();
+
+app.get("/health", async (_req, res) => {
+  let storageOk = true;
+  try {
+    await storage.ping();
+  } catch (error) {
+    storageOk = false;
+  }
+
+  res.json({
+    ok: storageOk,
+    storage: storage.kind
+  });
 });
 
 app.get("/", (_req, res) => {
-  res.json({ ok: true, service: "digital-twin-api", version: "0.1.0" });
+  res.json({
+    ok: true,
+    service: "digital-twin-api",
+    version: "0.2.0",
+    storage: storage.kind
+  });
 });
 
 app.get("/v1/disclaimer", (_req, res) => {
   res.json({ text: DISCLAIMER });
 });
 
-app.post("/v1/baseline", (req, res) => {
-  const input = req.body;
-  const validation = validateInput(input);
-  if (!validation.valid) {
-    return res.status(400).json({
-      code: "VALIDATION_ERROR",
-      message: "Invalid baseline input",
-      details: validation.errors
-    });
-  }
-
-  const { relativeScore, factorScores } = computeScore(input);
-  return res.json({
-    baselineId: `base_${Date.now()}`,
-    input,
-    relativeScore,
-    factorScores,
-    trendLabel: "stable",
-    generatedAt: new Date().toISOString(),
-    disclaimer: DISCLAIMER
-  });
-});
-
-app.post("/v1/scenarios/run", (req, res) => {
-  const { baseline, scenarios } = req.body || {};
-  if (
-    !baseline ||
-    typeof baseline !== "object" ||
-    !baseline.input ||
-    !Array.isArray(scenarios)
-  ) {
-    return res.status(400).json({
-      code: "VALIDATION_ERROR",
-      message: "Request must include baseline and scenarios[]"
-    });
-  }
-
-  const baselineScore = Number(baseline.relativeScore || 0);
-  const results = scenarios.map((scenario, index) => {
-    const effectiveInput = { ...baseline.input, ...(scenario.overrides || {}) };
-    const validation = validateInput(effectiveInput);
+app.post("/v1/baseline", async (req, res) => {
+  try {
+    const input = req.body;
+    const validation = validateInput(input);
     if (!validation.valid) {
-      return {
-        scenarioId: `scn_${index + 1}`,
-        scenarioName: scenario.scenarioName || `Scenario ${index + 1}`,
-        error: validation.errors,
-        disclaimer: DISCLAIMER
-      };
+      return res.status(400).json({
+        code: "VALIDATION_ERROR",
+        message: "Invalid baseline input",
+        details: validation.errors
+      });
     }
 
-    const computed = computeScore(effectiveInput);
-    const delta = Math.round((computed.relativeScore - baselineScore) * 100) / 100;
-    const deviationPercent =
-      Math.round((Math.abs(delta) / Math.max(baselineScore, 1)) * 10000) / 100;
+    const { relativeScore, factorScores } = computeScore(input);
+    const sessionId = typeof req.body?.sessionId === "string" ? req.body.sessionId : makeId("sess");
 
-    return {
-      scenarioId: `scn_${index + 1}`,
-      scenarioName: scenario.scenarioName || `Scenario ${index + 1}`,
-      effectiveInput,
-      relativeScore: computed.relativeScore,
-      deltaFromBaseline: delta,
-      deviationPercent,
-      trendDirection: trendFromDelta(delta),
+    const baselinePayload = {
+      sessionId,
+      baselineId: makeId("base"),
+      input,
+      relativeScore,
+      factorScores,
+      trendLabel: "stable",
       generatedAt: new Date().toISOString(),
       disclaimer: DISCLAIMER
     };
-  });
 
-  return res.json(results);
-});
-
-app.post("/v1/scenarios/compare", (req, res) => {
-  const { baseline, scenarioResults } = req.body || {};
-  if (!baseline || typeof baseline !== "object" || !Array.isArray(scenarioResults)) {
-    return res.status(400).json({
-      code: "VALIDATION_ERROR",
-      message: "Request must include baseline and scenarioResults[]"
+    await storage.saveBaseline(sessionId, baselinePayload);
+    return res.json(baselinePayload);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      code: "INTERNAL_ERROR",
+      message: "Failed to generate baseline"
     });
   }
+});
 
-  const normalized = scenarioResults
-    .filter((item) => item && typeof item.relativeScore === "number")
-    .map((item) => {
-      const cue = item.trendDirection === "improving" ? "up" : item.trendDirection === "declining" ? "down" : "flat";
+app.post("/v1/scenarios/run", async (req, res) => {
+  try {
+    const { baseline, scenarios } = req.body || {};
+    if (
+      !baseline ||
+      typeof baseline !== "object" ||
+      !baseline.input ||
+      !Array.isArray(scenarios)
+    ) {
+      return res.status(400).json({
+        code: "VALIDATION_ERROR",
+        message: "Request must include baseline and scenarios[]"
+      });
+    }
+
+    const baselineScore = Number(baseline.relativeScore || 0);
+    const results = scenarios.map((scenario, index) => {
+      const effectiveInput = { ...baseline.input, ...(scenario.overrides || {}) };
+      const validation = validateInput(effectiveInput);
+      if (!validation.valid) {
+        return {
+          scenarioId: `scn_${index + 1}`,
+          scenarioName: scenario.scenarioName || `Scenario ${index + 1}`,
+          error: validation.errors,
+          disclaimer: DISCLAIMER
+        };
+      }
+
+      const computed = computeScore(effectiveInput);
+      const delta = Math.round((computed.relativeScore - baselineScore) * 100) / 100;
+      const deviationPercent =
+        Math.round((Math.abs(delta) / Math.max(baselineScore, 1)) * 10000) / 100;
+
       return {
-        scenarioId: item.scenarioId,
-        scenarioName: item.scenarioName,
-        score: item.relativeScore,
-        delta: item.deltaFromBaseline,
-        trendDirection: item.trendDirection,
-        cue,
-        summary: `${item.scenarioName}: ${item.trendDirection} (${item.deltaFromBaseline} vs baseline)`
+        scenarioId: `scn_${index + 1}`,
+        scenarioName: scenario.scenarioName || `Scenario ${index + 1}`,
+        effectiveInput,
+        relativeScore: computed.relativeScore,
+        deltaFromBaseline: delta,
+        deviationPercent,
+        trendDirection: trendFromDelta(delta),
+        generatedAt: new Date().toISOString(),
+        disclaimer: DISCLAIMER
       };
     });
 
-  return res.json({
-    baselineScore: baseline.relativeScore,
-    scenarios: normalized,
-    disclaimer: DISCLAIMER
-  });
+    if (baseline.sessionId) {
+      await storage.saveScenarioResults(baseline.sessionId, baseline, results);
+    }
+
+    return res.json(results);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      code: "INTERNAL_ERROR",
+      message: "Failed to run scenarios"
+    });
+  }
+});
+
+app.post("/v1/scenarios/compare", async (req, res) => {
+  try {
+    const { baseline, scenarioResults } = req.body || {};
+    if (!baseline || typeof baseline !== "object" || !Array.isArray(scenarioResults)) {
+      return res.status(400).json({
+        code: "VALIDATION_ERROR",
+        message: "Request must include baseline and scenarioResults[]"
+      });
+    }
+
+    const normalized = scenarioResults
+      .filter((item) => item && typeof item.relativeScore === "number")
+      .map((item) => {
+        const cue =
+          item.trendDirection === "improving"
+            ? "up"
+            : item.trendDirection === "declining"
+              ? "down"
+              : "flat";
+        return {
+          scenarioId: item.scenarioId,
+          scenarioName: item.scenarioName,
+          score: item.relativeScore,
+          delta: item.deltaFromBaseline,
+          trendDirection: item.trendDirection,
+          cue,
+          summary: `${item.scenarioName}: ${item.trendDirection} (${item.deltaFromBaseline} vs baseline)`
+        };
+      });
+
+    const comparePayload = {
+      baselineScore: baseline.relativeScore,
+      scenarios: normalized,
+      disclaimer: DISCLAIMER
+    };
+
+    if (baseline.sessionId) {
+      await storage.saveComparison(
+        baseline.sessionId,
+        baseline,
+        scenarioResults,
+        comparePayload
+      );
+    }
+
+    return res.json(comparePayload);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      code: "INTERNAL_ERROR",
+      message: "Failed to compare scenarios"
+    });
+  }
+});
+
+app.get("/v1/sessions", async (req, res) => {
+  try {
+    const parsedLimit = Number(req.query.limit || 20);
+    const limit = Number.isFinite(parsedLimit) ? clamp(parsedLimit, 1, 100) : 20;
+    const sessions = await storage.listSessions(limit);
+
+    const items = sessions.map((session) => ({
+      sessionId: session.sessionId,
+      baselineScore: session.baseline?.relativeScore ?? null,
+      scenarioCount: Array.isArray(session.scenarioResults)
+        ? session.scenarioResults.filter(
+            (item) => item && typeof item.relativeScore === "number"
+          ).length
+        : 0,
+      hasComparison: Boolean(session.comparison),
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt
+    }));
+
+    return res.json({ items });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      code: "INTERNAL_ERROR",
+      message: "Failed to list sessions"
+    });
+  }
+});
+
+app.get("/v1/sessions/:sessionId", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const session = await storage.getSession(sessionId);
+    if (!session) {
+      return res.status(404).json({
+        code: "NOT_FOUND",
+        message: "Session not found"
+      });
+    }
+
+    return res.json({
+      ...session,
+      disclaimer: DISCLAIMER
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      code: "INTERNAL_ERROR",
+      message: "Failed to load session"
+    });
+  }
 });
 
 app.listen(port, () => {
-  console.log(`API running on port ${port}`);
+  console.log(`API running on port ${port} (storage=${storage.kind})`);
 });
+
