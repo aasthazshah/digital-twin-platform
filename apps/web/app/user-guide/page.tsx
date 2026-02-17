@@ -2,6 +2,7 @@ import Link from "next/link";
 
 const quickSteps = [
   "Open the app and wait for guest identity to initialize.",
+  "Save your Public Identity ID and Recovery Key in a safe place.",
   "Fill baseline lifestyle inputs and click Generate Baseline.",
   "Add or edit scenarios, then click Run Scenarios.",
   "Read score, trend, and comparison summary.",
@@ -82,6 +83,13 @@ export default function UserGuidePage() {
             <p>You see the same saved sessions and can load them again.</p>
           </div>
           <div className="guide-item">
+            <h3>Recovery</h3>
+            <p>
+              If you lose access (new browser/device), use <strong>Public Identity ID</strong>{" "}
+              and <strong>Recovery Key</strong> in the Recover Identity form.
+            </p>
+          </div>
+          <div className="guide-item">
             <h3>New Key</h3>
             <p>
               If you click <strong>Create New Guest Identity</strong>, you get a new key. Old
@@ -90,7 +98,8 @@ export default function UserGuidePage() {
           </div>
         </div>
         <p className="identity-warning">
-          If you need older sessions, do not create a new identity.
+          Keep the recovery key offline. It is shown once and is needed to recover your
+          old sessions.
         </p>
       </section>
 
@@ -110,4 +119,3 @@ export default function UserGuidePage() {
     </main>
   );
 }
-

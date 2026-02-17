@@ -75,3 +75,13 @@
   - Complete privacy check: no real patient medical record storage
   - Run final smoke tests and publish release notes
   - _Requirements: 4.1, 5_
+
+- [x] 13. Add simple secure identity recovery flow
+  - Introduce `publicIdentityId` (shareable) and `recoveryKey` (secret) for each guest user
+  - Show `recoveryKey` once in UI and instruct user to save it offline
+  - Store only hashed `recoveryKey` (never plain text) using strong hashing (`scrypt`/`pbkdf2`)
+  - Add `POST /v1/auth/recover` to issue a new bearer token from `publicIdentityId + recoveryKey`
+  - Keep session ownership bound to recovered identity; old sessions become accessible again after recovery
+  - Add basic abuse controls: attempt throttling/rate limit and generic error responses
+  - Add minimal UX: "Recover Identity" form + "Rotate Recovery Key" action
+  - _Requirements: 4.1, 4.2_

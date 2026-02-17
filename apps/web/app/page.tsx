@@ -87,7 +87,30 @@ type StoredSession = {
 type AuthState = {
   token: string;
   userId: string;
+  publicIdentityId: string | null;
+  recoveryConfigured: boolean;
   expiresAt: string;
+};
+
+type GuestAuthResponse = {
+  token: string;
+  expiresAt: string;
+  user?: {
+    userId?: string;
+    publicIdentityId?: string | null;
+    type?: string;
+  };
+  recoveryKey?: string;
+};
+
+type AuthMeResponse = {
+  user?: {
+    userId?: string;
+    publicIdentityId?: string | null;
+    type?: string;
+  };
+  expiresAt?: string;
+  recoveryConfigured?: boolean;
 };
 
 const AGE_RANGES = ["13-17", "18-25", "26-35", "36-45", "46-55", "56-65", "66+"];
@@ -101,6 +124,7 @@ const STRESS_OPTIONS = ["low", "moderate", "high", "acute"];
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 const TOKEN_KEY = "dt_auth_token";
 const USER_KEY = "dt_auth_user";
+const PID_KEY = "dt_auth_public_id";
 const EXP_KEY = "dt_auth_exp";
 
 export default function Home() {
@@ -151,7 +175,15 @@ export default function Home() {
   const [loadingScenarios, setLoadingScenarios] = useState(false);
   const [loadingRecent, setLoadingRecent] = useState(false);
   const [loadingSessionId, setLoadingSessionId] = useState<string | null>(null);
+  const [loadingRecover, setLoadingRecover] = useState(false);
+  const [loadingRotateRecovery, setLoadingRotateRecovery] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [recoveryInfo, setRecoveryInfo] = useState<string | null>(null);
+  const [recoveryKeyNotice, setRecoveryKeyNotice] = useState<string | null>(null);
+  const [recoveryForm, setRecoveryForm] = useState({
+    publicIdentityId: "",
+    recoveryKey: ""
+  });
   const [resultsView, setResultsView] = useState<"table" | "charts" | "both">("both");
 
   const scenarioCountText = useMemo(
@@ -257,15 +289,21 @@ export default function Home() {
     setScenarios((prev) => prev.filter((item) => item.id !== id));
   }
 
+  function updateRecoveryForm(field: keyof typeof recoveryForm, value: string) {
+    setRecoveryForm((prev) => ({ ...prev, [field]: value }));
+  }
+
   function persistAuth(nextAuth: AuthState | null) {
     if (!nextAuth) {
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem(USER_KEY);
+      localStorage.removeItem(PID_KEY);
       localStorage.removeItem(EXP_KEY);
       return;
     }
     localStorage.setItem(TOKEN_KEY, nextAuth.token);
     localStorage.setItem(USER_KEY, nextAuth.userId);
+    localStorage.setItem(PID_KEY, nextAuth.publicIdentityId || "");
     localStorage.setItem(EXP_KEY, nextAuth.expiresAt);
   }
 
@@ -277,37 +315,56 @@ export default function Home() {
     if (!response.ok) {
       throw new Error("Failed to create guest auth");
     }
-    const data = await response.json();
+    const data = (await response.json()) as GuestAuthResponse;
+    const userId = data.user?.userId || "";
+    if (!userId) {
+      throw new Error("Invalid auth response");
+    }
     return {
       token: data.token as string,
-      userId: data.user?.userId as string,
-      expiresAt: data.expiresAt as string
+      userId,
+      publicIdentityId: data.user?.publicIdentityId || null,
+      recoveryConfigured: true,
+      expiresAt: data.expiresAt as string,
+      recoveryKey: data.recoveryKey || null
     };
   }
 
   async function bootstrapAuth(forceNew: boolean) {
     setAuthLoading(true);
     setAuthError(null);
+    setRecoveryInfo(null);
 
     try {
       if (!forceNew) {
         const existingToken = localStorage.getItem(TOKEN_KEY);
-        const existingUserId = localStorage.getItem(USER_KEY);
         const existingExp = localStorage.getItem(EXP_KEY);
+        const existingPid = localStorage.getItem(PID_KEY);
 
-        if (existingToken && existingUserId && existingExp) {
+        if (existingToken && existingExp) {
           const check = await fetch(`${API_BASE}/v1/auth/me`, {
             headers: { Authorization: `Bearer ${existingToken}` }
           });
 
           if (check.ok) {
+            const me = (await check.json()) as AuthMeResponse;
+            const userId = me.user?.userId || localStorage.getItem(USER_KEY) || "";
+            if (!userId) {
+              throw new Error("Invalid auth profile response");
+            }
             const nextAuth = {
               token: existingToken,
-              userId: existingUserId,
-              expiresAt: existingExp
+              userId,
+              publicIdentityId: me.user?.publicIdentityId || existingPid || null,
+              recoveryConfigured: Boolean(me.recoveryConfigured),
+              expiresAt: me.expiresAt || existingExp
             };
             setAuth(nextAuth);
             persistAuth(nextAuth);
+            setRecoveryForm((prev) => ({
+              ...prev,
+              publicIdentityId: nextAuth.publicIdentityId || prev.publicIdentityId
+            }));
             setAuthLoading(false);
             return;
           }
@@ -315,11 +372,28 @@ export default function Home() {
       }
 
       const guest = await requestGuestAuth();
-      setAuth(guest);
-      persistAuth(guest);
+      const nextAuth: AuthState = {
+        token: guest.token,
+        userId: guest.userId,
+        publicIdentityId: guest.publicIdentityId,
+        recoveryConfigured: guest.recoveryConfigured,
+        expiresAt: guest.expiresAt
+      };
+      setAuth(nextAuth);
+      persistAuth(nextAuth);
+      setRecoveryForm((prev) => ({
+        ...prev,
+        publicIdentityId: nextAuth.publicIdentityId || prev.publicIdentityId,
+        recoveryKey: ""
+      }));
+      setRecoveryKeyNotice(guest.recoveryKey || null);
+      if (guest.recoveryKey) {
+        setRecoveryInfo("A new recovery key was issued. Save it now.");
+      }
     } catch (err) {
       setAuth(null);
       persistAuth(null);
+      setRecoveryKeyNotice(null);
       setAuthError(err instanceof Error ? err.message : "Auth initialization failed");
     } finally {
       setAuthLoading(false);
@@ -338,6 +412,110 @@ export default function Home() {
     setScenarioResults([]);
     setComparison(null);
     setRecentSessions([]);
+    setRecoveryForm({
+      publicIdentityId: "",
+      recoveryKey: ""
+    });
+  }
+
+  async function recoverIdentity() {
+    const publicIdentityId = recoveryForm.publicIdentityId.trim();
+    const recoveryKey = recoveryForm.recoveryKey.trim();
+
+    if (!publicIdentityId || !recoveryKey) {
+      setError("Enter both Public Identity ID and Recovery Key.");
+      return;
+    }
+
+    setLoadingRecover(true);
+    setError(null);
+    setRecoveryInfo(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/v1/auth/recover`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ publicIdentityId, recoveryKey })
+      });
+
+      const body = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(body?.message || "Failed to recover identity");
+      }
+
+      const userId = body?.user?.userId || "";
+      if (!userId) {
+        throw new Error("Invalid recovery response");
+      }
+
+      const nextAuth: AuthState = {
+        token: body.token as string,
+        userId,
+        publicIdentityId: body?.user?.publicIdentityId || publicIdentityId,
+        recoveryConfigured: true,
+        expiresAt: body.expiresAt as string
+      };
+
+      setAuth(nextAuth);
+      persistAuth(nextAuth);
+      setRecoveryInfo("Identity recovered. Saved sessions for this identity are now available.");
+      setRecoveryKeyNotice(null);
+      setBaseline(null);
+      setScenarioResults([]);
+      setComparison(null);
+      setRecentSessions([]);
+      await fetchRecentSessions(nextAuth.token);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to recover identity");
+    } finally {
+      setLoadingRecover(false);
+    }
+  }
+
+  async function rotateRecoveryKey() {
+    if (!auth?.token) {
+      setError("Authentication not ready.");
+      return;
+    }
+
+    setLoadingRotateRecovery(true);
+    setError(null);
+    setRecoveryInfo(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/v1/auth/recovery-key/rotate`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+          "Content-Type": "application/json"
+        }
+      });
+
+      const body = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(body?.message || "Failed to rotate recovery key");
+      }
+
+      const publicIdentityId = (body?.publicIdentityId as string) || auth.publicIdentityId;
+      const nextAuth: AuthState = {
+        ...auth,
+        publicIdentityId,
+        recoveryConfigured: true
+      };
+      setAuth(nextAuth);
+      persistAuth(nextAuth);
+      setRecoveryForm((prev) => ({
+        ...prev,
+        publicIdentityId: publicIdentityId || prev.publicIdentityId,
+        recoveryKey: ""
+      }));
+      setRecoveryKeyNotice((body?.recoveryKey as string) || null);
+      setRecoveryInfo("Recovery key rotated. Save the new key now.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to rotate recovery key");
+    } finally {
+      setLoadingRotateRecovery(false);
+    }
   }
 
   function authHeaders() {
@@ -471,8 +649,9 @@ export default function Home() {
     }
   }
 
-  async function fetchRecentSessions() {
-    if (!auth?.token) {
+  async function fetchRecentSessions(tokenOverride?: string) {
+    const token = tokenOverride || auth?.token;
+    if (!token) {
       return;
     }
 
@@ -480,7 +659,7 @@ export default function Home() {
     try {
       const response = await fetch(`${API_BASE}/v1/sessions?limit=10`, {
         headers: {
-          Authorization: `Bearer ${auth.token}`
+          Authorization: `Bearer ${token}`
         }
       });
       if (!response.ok) {
@@ -533,10 +712,10 @@ export default function Home() {
   return (
     <main className="page">
       <div className="hero">
-        <p className="badge">Phase 3</p>
+        <p className="badge">Phase 4</p>
         <h1>Personalized Digital Twin Health App</h1>
         <p className="subtitle">
-          Lightweight auth enabled with per-user session ownership.
+          Lightweight auth enabled with per-user session ownership and identity recovery.
         </p>
         <div className="hero-actions">
           <Link className="chip-link" href="/user-guide">
@@ -564,21 +743,68 @@ export default function Home() {
         ) : auth ? (
           <div className="result-grid">
             <div className="result-box">
-              <p className="label">User ID</p>
-              <p className="value small">{auth.userId}</p>
+              <p className="label">Public Identity ID</p>
+              <p className="value small identity-id">{auth.publicIdentityId || "Not configured"}</p>
             </div>
             <div className="result-box">
               <p className="label">Token Expires</p>
               <p className="value small">{new Date(auth.expiresAt).toLocaleString()}</p>
             </div>
             <div className="result-box">
-              <p className="label">Scope</p>
-              <p className="value small">Own sessions only</p>
+              <p className="label">Recovery</p>
+              <p className="value small">
+                {auth.recoveryConfigured ? "Configured" : "Not configured yet"}
+              </p>
             </div>
           </div>
         ) : (
           <p className="error">{authError || "Unable to initialize auth"}</p>
         )}
+        {recoveryKeyNotice ? (
+          <p className="recovery-key-box">
+            Recovery key (shown once): <code>{recoveryKeyNotice}</code>
+          </p>
+        ) : null}
+        <div className="recovery-panel">
+          <h3>Recover Identity</h3>
+          <div className="grid">
+            <label>
+              Public Identity ID
+              <input
+                type="text"
+                value={recoveryForm.publicIdentityId}
+                onChange={(event) => updateRecoveryForm("publicIdentityId", event.target.value)}
+                placeholder="pid_..."
+              />
+            </label>
+            <label>
+              Recovery Key
+              <input
+                type="text"
+                value={recoveryForm.recoveryKey}
+                onChange={(event) => updateRecoveryForm("recoveryKey", event.target.value)}
+                placeholder="Paste saved recovery key"
+              />
+            </label>
+          </div>
+          <div className="actions">
+            <button className="ghost" onClick={recoverIdentity} disabled={loadingRecover}>
+              {loadingRecover ? "Recovering..." : "Recover Identity"}
+            </button>
+            <button
+              className="ghost"
+              onClick={rotateRecoveryKey}
+              disabled={loadingRotateRecovery || !auth}
+            >
+              {loadingRotateRecovery ? "Rotating..." : "Rotate Recovery Key"}
+            </button>
+          </div>
+          <p className="subtitle">
+            Save your Public Identity ID and Recovery Key offline. Use them to access your old
+            sessions on a new browser or device.
+          </p>
+          {recoveryInfo ? <p className="subtitle">{recoveryInfo}</p> : null}
+        </div>
         <p className="identity-warning">
           If you create a new guest identity, your previous sessions will not show up for
           this new identity.
@@ -1018,7 +1244,11 @@ export default function Home() {
       <section className="card">
         <div className="section-head">
           <h2>6) Saved Sessions</h2>
-          <button className="ghost" onClick={fetchRecentSessions} disabled={loadingRecent || !auth}>
+          <button
+            className="ghost"
+            onClick={() => void fetchRecentSessions()}
+            disabled={loadingRecent || !auth}
+          >
             {loadingRecent ? "Refreshing..." : "Refresh"}
           </button>
         </div>

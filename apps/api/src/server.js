@@ -12,6 +12,12 @@ const databaseUrl = process.env.DATABASE_URL || "";
 const databaseSsl = String(process.env.DATABASE_SSL || "").toLowerCase() === "true";
 const authSecret = process.env.AUTH_SECRET || "dev-change-this-auth-secret";
 const authTokenTtlSeconds = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 60 * 60 * 24 * 30);
+const recoveryThrottleWindowMsRaw = Number(
+  process.env.RECOVERY_THROTTLE_WINDOW_MS || 10 * 60 * 1000
+);
+const recoveryThrottleMaxAttemptsRaw = Number(
+  process.env.RECOVERY_THROTTLE_MAX_ATTEMPTS || 8
+);
 
 app.use(
   cors({
@@ -30,6 +36,12 @@ const DISCLAIMER =
   "Educational simulation only. This app does not provide medical diagnosis, treatment, or prescriptions.";
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+const recoveryThrottleWindowMs = Number.isFinite(recoveryThrottleWindowMsRaw)
+  ? clamp(Math.floor(recoveryThrottleWindowMsRaw), 1000, 24 * 60 * 60 * 1000)
+  : 10 * 60 * 1000;
+const recoveryThrottleMaxAttempts = Number.isFinite(recoveryThrottleMaxAttemptsRaw)
+  ? clamp(Math.floor(recoveryThrottleMaxAttemptsRaw), 1, 100)
+  : 8;
 
 const toFactor = {
   bodyCategory: {
@@ -89,6 +101,58 @@ const baseWeights = {
 
 function makeId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function generateRecoveryKey() {
+  return base64UrlEncode(crypto.randomBytes(24));
+}
+
+function hashRecoveryKey(recoveryKey, recoverySalt) {
+  return base64UrlEncode(
+    crypto.scryptSync(recoveryKey, recoverySalt, 32, {
+      N: 16384,
+      r: 8,
+      p: 1
+    })
+  );
+}
+
+function buildRecoveryCredentials() {
+  const recoveryKey = generateRecoveryKey();
+  const recoverySalt = base64UrlEncode(crypto.randomBytes(16));
+  const recoveryHash = hashRecoveryKey(recoveryKey, recoverySalt);
+  return {
+    recoveryKey,
+    recoverySalt,
+    recoveryHash
+  };
+}
+
+function safeEqualString(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") {
+    return false;
+  }
+  const bufferA = Buffer.from(a);
+  const bufferB = Buffer.from(b);
+  return (
+    bufferA.length === bufferB.length && crypto.timingSafeEqual(bufferA, bufferB)
+  );
+}
+
+function verifyRecoveryKey(recoveryKey, recoverySalt, expectedRecoveryHash) {
+  if (
+    typeof recoveryKey !== "string" ||
+    !recoveryKey ||
+    typeof recoverySalt !== "string" ||
+    !recoverySalt ||
+    typeof expectedRecoveryHash !== "string" ||
+    !expectedRecoveryHash
+  ) {
+    return false;
+  }
+
+  const actualHash = hashRecoveryKey(recoveryKey, recoverySalt);
+  return safeEqualString(actualHash, expectedRecoveryHash);
 }
 
 function sleepFactor(sleepHours) {
@@ -299,12 +363,85 @@ function requireAuth(req, res, next) {
 
 function createMemoryStorage(kind = "memory") {
   const sessions = new Map();
+  const identitiesByUserId = new Map();
+  const userIdByPublicIdentityId = new Map();
+
+  function issueRecoveryKey(userId, publicIdentityId) {
+    const existing = identitiesByUserId.get(userId);
+    const now = new Date().toISOString();
+    const { recoveryKey, recoverySalt, recoveryHash } = buildRecoveryCredentials();
+
+    let resolvedPublicIdentityId = publicIdentityId || existing?.publicIdentityId;
+    if (!resolvedPublicIdentityId) {
+      do {
+        resolvedPublicIdentityId = makeId("pid");
+      } while (userIdByPublicIdentityId.has(resolvedPublicIdentityId));
+    }
+
+    if (existing?.publicIdentityId && existing.publicIdentityId !== resolvedPublicIdentityId) {
+      userIdByPublicIdentityId.delete(existing.publicIdentityId);
+    }
+
+    identitiesByUserId.set(userId, {
+      userId,
+      publicIdentityId: resolvedPublicIdentityId,
+      recoverySalt,
+      recoveryHash,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now
+    });
+    userIdByPublicIdentityId.set(resolvedPublicIdentityId, userId);
+
+    return {
+      userId,
+      publicIdentityId: resolvedPublicIdentityId,
+      recoveryKey
+    };
+  }
 
   return {
     kind,
     async init() {},
     async ping() {
       return { ok: true };
+    },
+    async createIdentity(userId) {
+      return issueRecoveryKey(userId);
+    },
+    async getIdentityByUserId(userId) {
+      const identity = identitiesByUserId.get(userId);
+      if (!identity) {
+        return null;
+      }
+      return {
+        userId: identity.userId,
+        publicIdentityId: identity.publicIdentityId
+      };
+    },
+    async recoverIdentity(publicIdentityId, recoveryKey) {
+      const userId = userIdByPublicIdentityId.get(publicIdentityId);
+      if (!userId) {
+        return null;
+      }
+
+      const identity = identitiesByUserId.get(userId);
+      if (!identity) {
+        return null;
+      }
+
+      if (
+        !verifyRecoveryKey(recoveryKey, identity.recoverySalt, identity.recoveryHash)
+      ) {
+        return null;
+      }
+
+      return {
+        userId: identity.userId,
+        publicIdentityId: identity.publicIdentityId
+      };
+    },
+    async rotateRecoveryKey(userId) {
+      return issueRecoveryKey(userId);
     },
     async saveBaseline(ownerUserId, sessionId, baseline) {
       const existing = sessions.get(sessionId);
@@ -385,6 +522,44 @@ function createPostgresStorage() {
     ssl: databaseSsl ? { rejectUnauthorized: false } : undefined
   });
 
+  async function upsertIdentityAndIssueKey(userId) {
+    let lastError = null;
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const publicIdentityId = makeId("pid");
+      const { recoveryKey, recoverySalt, recoveryHash } = buildRecoveryCredentials();
+
+      try {
+        const result = await pool.query(
+          `
+          INSERT INTO twin_identities (user_id, public_identity_id, recovery_salt, recovery_hash)
+          VALUES ($1, $2, $3, $4)
+          ON CONFLICT (user_id)
+          DO UPDATE SET
+            recovery_salt = EXCLUDED.recovery_salt,
+            recovery_hash = EXCLUDED.recovery_hash,
+            updated_at = NOW()
+          RETURNING user_id, public_identity_id
+        `,
+          [userId, publicIdentityId, recoverySalt, recoveryHash]
+        );
+
+        return {
+          userId: result.rows[0].user_id,
+          publicIdentityId: result.rows[0].public_identity_id,
+          recoveryKey
+        };
+      } catch (error) {
+        if (error && error.code === "23505") {
+          lastError = error;
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    throw lastError || new Error("Unable to issue identity recovery key");
+  }
+
   return {
     kind: "postgres",
     async init() {
@@ -420,10 +595,75 @@ function createPostgresStorage() {
         CREATE INDEX IF NOT EXISTS idx_twin_sessions_owner_updated
         ON twin_sessions(owner_user_id, updated_at DESC)
       `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS twin_identities (
+          user_id TEXT PRIMARY KEY,
+          public_identity_id TEXT UNIQUE NOT NULL,
+          recovery_salt TEXT NOT NULL,
+          recovery_hash TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await pool.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_twin_identities_public_id
+        ON twin_identities(public_identity_id)
+      `);
     },
     async ping() {
       await pool.query("SELECT 1");
       return { ok: true };
+    },
+    async createIdentity(userId) {
+      return upsertIdentityAndIssueKey(userId);
+    },
+    async getIdentityByUserId(userId) {
+      const result = await pool.query(
+        `
+        SELECT user_id, public_identity_id
+        FROM twin_identities
+        WHERE user_id = $1
+      `,
+        [userId]
+      );
+
+      if (result.rowCount === 0) {
+        return null;
+      }
+
+      return {
+        userId: result.rows[0].user_id,
+        publicIdentityId: result.rows[0].public_identity_id
+      };
+    },
+    async recoverIdentity(publicIdentityId, recoveryKey) {
+      const result = await pool.query(
+        `
+        SELECT user_id, public_identity_id, recovery_salt, recovery_hash
+        FROM twin_identities
+        WHERE public_identity_id = $1
+      `,
+        [publicIdentityId]
+      );
+
+      if (result.rowCount === 0) {
+        return null;
+      }
+
+      const row = result.rows[0];
+      if (!verifyRecoveryKey(recoveryKey, row.recovery_salt, row.recovery_hash)) {
+        return null;
+      }
+
+      return {
+        userId: row.user_id,
+        publicIdentityId: row.public_identity_id
+      };
+    },
+    async rotateRecoveryKey(userId) {
+      return upsertIdentityAndIssueKey(userId);
     },
     async saveBaseline(ownerUserId, sessionId, baseline) {
       const result = await pool.query(
@@ -540,6 +780,55 @@ async function buildStorage() {
 }
 
 const storage = await buildStorage();
+const recoveryAttemptState = new Map();
+
+function getRequesterIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0].trim();
+  }
+  return req.ip || "unknown";
+}
+
+function getRecoveryAttemptKey(req, publicIdentityId) {
+  return `${getRequesterIp(req)}::${publicIdentityId}`;
+}
+
+function isRecoveryRateLimited(attemptKey) {
+  const record = recoveryAttemptState.get(attemptKey);
+  if (!record) {
+    return false;
+  }
+
+  if (record.resetAt <= Date.now()) {
+    recoveryAttemptState.delete(attemptKey);
+    return false;
+  }
+
+  return record.count >= recoveryThrottleMaxAttempts;
+}
+
+function registerRecoveryFailure(attemptKey) {
+  const now = Date.now();
+  const existing = recoveryAttemptState.get(attemptKey);
+
+  if (!existing || existing.resetAt <= now) {
+    recoveryAttemptState.set(attemptKey, {
+      count: 1,
+      resetAt: now + recoveryThrottleWindowMs
+    });
+    return;
+  }
+
+  recoveryAttemptState.set(attemptKey, {
+    count: existing.count + 1,
+    resetAt: existing.resetAt
+  });
+}
+
+function clearRecoveryFailures(attemptKey) {
+  recoveryAttemptState.delete(attemptKey);
+}
 
 app.get("/health", async (_req, res) => {
   let storageOk = true;
@@ -559,32 +848,127 @@ app.get("/", (_req, res) => {
   res.json({
     ok: true,
     service: "digital-twin-api",
-    version: "0.3.0",
+    version: "0.4.0",
     storage: storage.kind
   });
 });
 
-app.post("/v1/auth/guest", (_req, res) => {
-  const userId = makeId("user");
-  const auth = createAuthPayload(userId);
-  return res.json({
-    token: auth.token,
-    expiresAt: auth.expiresAt,
-    user: {
-      userId,
-      type: "guest"
-    }
-  });
+app.post("/v1/auth/guest", async (_req, res) => {
+  try {
+    const userId = makeId("user");
+    const identity = await storage.createIdentity(userId);
+    const auth = createAuthPayload(userId);
+
+    return res.json({
+      token: auth.token,
+      expiresAt: auth.expiresAt,
+      user: {
+        userId,
+        publicIdentityId: identity.publicIdentityId,
+        type: "guest"
+      },
+      recoveryKey: identity.recoveryKey,
+      recoveryHint: "Store this recovery key offline. It is shown once."
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      code: "INTERNAL_ERROR",
+      message: "Failed to create guest identity"
+    });
+  }
 });
 
-app.get("/v1/auth/me", requireAuth, (req, res) => {
-  return res.json({
-    user: {
-      userId: req.auth.userId,
-      type: "guest"
-    },
-    expiresAt: req.auth.expiresAt
-  });
+app.post("/v1/auth/recover", async (req, res) => {
+  const publicIdentityId =
+    typeof req.body?.publicIdentityId === "string"
+      ? req.body.publicIdentityId.trim()
+      : "";
+  const recoveryKey =
+    typeof req.body?.recoveryKey === "string" ? req.body.recoveryKey.trim() : "";
+
+  if (!publicIdentityId || !recoveryKey) {
+    return res.status(400).json({
+      code: "VALIDATION_ERROR",
+      message: "publicIdentityId and recoveryKey are required"
+    });
+  }
+
+  const attemptKey = getRecoveryAttemptKey(req, publicIdentityId);
+  if (isRecoveryRateLimited(attemptKey)) {
+    return res.status(429).json({
+      code: "TOO_MANY_ATTEMPTS",
+      message: "Too many recovery attempts. Try again later."
+    });
+  }
+
+  try {
+    const identity = await storage.recoverIdentity(publicIdentityId, recoveryKey);
+    if (!identity) {
+      registerRecoveryFailure(attemptKey);
+      return res.status(401).json({
+        code: "INVALID_RECOVERY",
+        message: "Invalid identity or recovery key"
+      });
+    }
+
+    clearRecoveryFailures(attemptKey);
+    const auth = createAuthPayload(identity.userId);
+
+    return res.json({
+      token: auth.token,
+      expiresAt: auth.expiresAt,
+      user: {
+        userId: identity.userId,
+        publicIdentityId: identity.publicIdentityId,
+        type: "guest"
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      code: "INTERNAL_ERROR",
+      message: "Failed to recover identity"
+    });
+  }
+});
+
+app.post("/v1/auth/recovery-key/rotate", requireAuth, async (req, res) => {
+  try {
+    const rotated = await storage.rotateRecoveryKey(req.auth.userId);
+    return res.json({
+      publicIdentityId: rotated.publicIdentityId,
+      recoveryKey: rotated.recoveryKey,
+      recoveryHint: "Store this new recovery key offline. It replaces the previous key."
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      code: "INTERNAL_ERROR",
+      message: "Failed to rotate recovery key"
+    });
+  }
+});
+
+app.get("/v1/auth/me", requireAuth, async (req, res) => {
+  try {
+    const identity = await storage.getIdentityByUserId(req.auth.userId);
+    return res.json({
+      user: {
+        userId: req.auth.userId,
+        publicIdentityId: identity?.publicIdentityId || null,
+        type: "guest"
+      },
+      recoveryConfigured: Boolean(identity?.publicIdentityId),
+      expiresAt: req.auth.expiresAt
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      code: "INTERNAL_ERROR",
+      message: "Failed to read auth profile"
+    });
+  }
 });
 
 app.get("/v1/disclaimer", (_req, res) => {
@@ -837,4 +1221,3 @@ app.get("/v1/sessions/:sessionId", requireAuth, async (req, res) => {
 app.listen(port, () => {
   console.log(`API running on port ${port} (storage=${storage.kind})`);
 });
-
