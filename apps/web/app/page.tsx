@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type Trend = "improving" | "stable" | "declining";
 
@@ -17,6 +17,7 @@ type LifestyleInput = {
 
 type BaselineState = {
   sessionId?: string;
+  ownerUserId?: string;
   baselineId: string;
   input: LifestyleInput;
   relativeScore: number;
@@ -73,12 +74,19 @@ type SessionSummary = {
 
 type StoredSession = {
   sessionId: string;
+  ownerUserId?: string;
   baseline: BaselineState | null;
   scenarioResults: ScenarioResult[];
   comparison: ComparisonResult | null;
   createdAt: string;
   updatedAt: string;
   disclaimer: string;
+};
+
+type AuthState = {
+  token: string;
+  userId: string;
+  expiresAt: string;
 };
 
 const AGE_RANGES = ["13-17", "18-25", "26-35", "36-45", "46-55", "56-65", "66+"];
@@ -90,8 +98,15 @@ const ADHERENCE_OPTIONS = ["adherent", "partial", "non_adherent"];
 const STRESS_OPTIONS = ["low", "moderate", "high", "acute"];
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+const TOKEN_KEY = "dt_auth_token";
+const USER_KEY = "dt_auth_user";
+const EXP_KEY = "dt_auth_exp";
 
 export default function Home() {
+  const [auth, setAuth] = useState<AuthState | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
+
   const [input, setInput] = useState({
     ageRange: "26-35",
     bodyCategory: "healthy",
@@ -142,6 +157,18 @@ export default function Home() {
     [scenarios.length]
   );
 
+  useEffect(() => {
+    void bootstrapAuth(false);
+  }, []);
+
+  useEffect(() => {
+    if (auth?.token) {
+      void fetchRecentSessions();
+    } else {
+      setRecentSessions([]);
+    }
+  }, [auth?.token]);
+
   function updateInput(field: keyof typeof input, value: string) {
     setInput((prev) => ({ ...prev, [field]: value }));
   }
@@ -171,6 +198,85 @@ export default function Home() {
     setScenarios((prev) => prev.filter((item) => item.id !== id));
   }
 
+  function persistAuth(nextAuth: AuthState | null) {
+    if (!nextAuth) {
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(USER_KEY);
+      localStorage.removeItem(EXP_KEY);
+      return;
+    }
+    localStorage.setItem(TOKEN_KEY, nextAuth.token);
+    localStorage.setItem(USER_KEY, nextAuth.userId);
+    localStorage.setItem(EXP_KEY, nextAuth.expiresAt);
+  }
+
+  async function requestGuestAuth() {
+    const response = await fetch(`${API_BASE}/v1/auth/guest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    });
+    if (!response.ok) {
+      throw new Error("Failed to create guest auth");
+    }
+    const data = await response.json();
+    return {
+      token: data.token as string,
+      userId: data.user?.userId as string,
+      expiresAt: data.expiresAt as string
+    };
+  }
+
+  async function bootstrapAuth(forceNew: boolean) {
+    setAuthLoading(true);
+    setAuthError(null);
+
+    try {
+      if (!forceNew) {
+        const existingToken = localStorage.getItem(TOKEN_KEY);
+        const existingUserId = localStorage.getItem(USER_KEY);
+        const existingExp = localStorage.getItem(EXP_KEY);
+
+        if (existingToken && existingUserId && existingExp) {
+          const check = await fetch(`${API_BASE}/v1/auth/me`, {
+            headers: { Authorization: `Bearer ${existingToken}` }
+          });
+
+          if (check.ok) {
+            const nextAuth = {
+              token: existingToken,
+              userId: existingUserId,
+              expiresAt: existingExp
+            };
+            setAuth(nextAuth);
+            persistAuth(nextAuth);
+            setAuthLoading(false);
+            return;
+          }
+        }
+      }
+
+      const guest = await requestGuestAuth();
+      setAuth(guest);
+      persistAuth(guest);
+    } catch (err) {
+      setAuth(null);
+      persistAuth(null);
+      setAuthError(err instanceof Error ? err.message : "Auth initialization failed");
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  function authHeaders() {
+    if (!auth?.token) {
+      throw new Error("Authentication not ready. Try Refresh Identity.");
+    }
+    return {
+      Authorization: `Bearer ${auth.token}`,
+      "Content-Type": "application/json"
+    };
+  }
+
   async function generateBaseline() {
     setError(null);
     setLoadingBaseline(true);
@@ -194,7 +300,7 @@ export default function Home() {
 
       const response = await fetch(`${API_BASE}/v1/baseline`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders(),
         body: JSON.stringify(payload)
       });
 
@@ -255,7 +361,7 @@ export default function Home() {
 
       const runResponse = await fetch(`${API_BASE}/v1/scenarios/run`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders(),
         body: JSON.stringify(payload)
       });
 
@@ -269,7 +375,7 @@ export default function Home() {
 
       const compareResponse = await fetch(`${API_BASE}/v1/scenarios/compare`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders(),
         body: JSON.stringify({
           baseline,
           scenarioResults: runData
@@ -293,9 +399,17 @@ export default function Home() {
   }
 
   async function fetchRecentSessions() {
+    if (!auth?.token) {
+      return;
+    }
+
     setLoadingRecent(true);
     try {
-      const response = await fetch(`${API_BASE}/v1/sessions?limit=10`);
+      const response = await fetch(`${API_BASE}/v1/sessions?limit=10`, {
+        headers: {
+          Authorization: `Bearer ${auth.token}`
+        }
+      });
       if (!response.ok) {
         return;
       }
@@ -305,18 +419,27 @@ export default function Home() {
         setRecentSessions(data.items);
       }
     } catch (_error) {
-      // ignore optional fetch errors in UI flow
+      // optional refresh errors are non-blocking in UI
     } finally {
       setLoadingRecent(false);
     }
   }
 
   async function loadSession(sessionId: string) {
+    if (!auth?.token) {
+      setError("Authentication not ready.");
+      return;
+    }
+
     setLoadingSessionId(sessionId);
     setError(null);
 
     try {
-      const response = await fetch(`${API_BASE}/v1/sessions/${sessionId}`);
+      const response = await fetch(`${API_BASE}/v1/sessions/${sessionId}`, {
+        headers: {
+          Authorization: `Bearer ${auth.token}`
+        }
+      });
       if (!response.ok) {
         const body = await response.json().catch(() => null);
         throw new Error(body?.message || "Failed to load session");
@@ -337,12 +460,41 @@ export default function Home() {
   return (
     <main className="page">
       <div className="hero">
-        <p className="badge">Phase 2</p>
+        <p className="badge">Phase 3</p>
         <h1>Personalized Digital Twin Health App</h1>
         <p className="subtitle">
-          Baseline/scenario simulation with session persistence and reload support.
+          Lightweight auth enabled with per-user session ownership.
         </p>
       </div>
+
+      <section className="card">
+        <div className="section-head">
+          <h2>Identity</h2>
+          <button className="ghost" onClick={() => bootstrapAuth(true)} disabled={authLoading}>
+            {authLoading ? "Refreshing..." : "Refresh Identity"}
+          </button>
+        </div>
+        {authLoading ? (
+          <p className="subtitle">Initializing guest identity...</p>
+        ) : auth ? (
+          <div className="result-grid">
+            <div className="result-box">
+              <p className="label">User ID</p>
+              <p className="value small">{auth.userId}</p>
+            </div>
+            <div className="result-box">
+              <p className="label">Token Expires</p>
+              <p className="value small">{new Date(auth.expiresAt).toLocaleString()}</p>
+            </div>
+            <div className="result-box">
+              <p className="label">Scope</p>
+              <p className="value small">Own sessions only</p>
+            </div>
+          </div>
+        ) : (
+          <p className="error">{authError || "Unable to initialize auth"}</p>
+        )}
+      </section>
 
       <section className="card">
         <h2>1) Baseline Input</h2>
@@ -461,7 +613,7 @@ export default function Home() {
         </div>
 
         <div className="actions">
-          <button onClick={generateBaseline} disabled={loadingBaseline}>
+          <button onClick={generateBaseline} disabled={loadingBaseline || !auth}>
             {loadingBaseline ? "Generating..." : "Generate Baseline"}
           </button>
         </div>
@@ -579,7 +731,7 @@ export default function Home() {
           <button className="ghost" onClick={addScenario}>
             Add Scenario
           </button>
-          <button onClick={runScenarios} disabled={!baseline || loadingScenarios}>
+          <button onClick={runScenarios} disabled={!baseline || loadingScenarios || !auth}>
             {loadingScenarios ? "Running..." : "Run Scenarios"}
           </button>
         </div>
@@ -596,12 +748,12 @@ export default function Home() {
               <p className="value">{baseline.relativeScore}</p>
             </div>
             <div className="result-box">
-              <p className="label">Trend</p>
-              <p className="value cap">{baseline.trendLabel}</p>
-            </div>
-            <div className="result-box">
               <p className="label">Session ID</p>
               <p className="value small">{baseline.sessionId || "n/a"}</p>
+            </div>
+            <div className="result-box">
+              <p className="label">Owner</p>
+              <p className="value small">{baseline.ownerUserId || "n/a"}</p>
             </div>
           </div>
         </section>
@@ -656,13 +808,13 @@ export default function Home() {
       <section className="card">
         <div className="section-head">
           <h2>6) Saved Sessions</h2>
-          <button className="ghost" onClick={fetchRecentSessions} disabled={loadingRecent}>
+          <button className="ghost" onClick={fetchRecentSessions} disabled={loadingRecent || !auth}>
             {loadingRecent ? "Refreshing..." : "Refresh"}
           </button>
         </div>
 
         {recentSessions.length === 0 ? (
-          <p className="subtitle">No saved sessions found yet.</p>
+          <p className="subtitle">No sessions for this user yet.</p>
         ) : (
           <div className="table-wrap">
             <table>

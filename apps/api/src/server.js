@@ -1,4 +1,5 @@
 import cors from "cors";
+import crypto from "crypto";
 import express from "express";
 import pg from "pg";
 
@@ -9,6 +10,8 @@ const port = Number(process.env.PORT || 4000);
 const corsOrigin = process.env.CORS_ORIGIN || "*";
 const databaseUrl = process.env.DATABASE_URL || "";
 const databaseSsl = String(process.env.DATABASE_SSL || "").toLowerCase() === "true";
+const authSecret = process.env.AUTH_SECRET || "dev-change-this-auth-secret";
+const authTokenTtlSeconds = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 60 * 60 * 24 * 30);
 
 app.use(
   cors({
@@ -163,6 +166,12 @@ function trendFromDelta(delta) {
   return "stable";
 }
 
+function ownershipError() {
+  const error = new Error("Session ownership mismatch");
+  error.code = "OWNERSHIP_MISMATCH";
+  return error;
+}
+
 function normalizeSession(record) {
   const created =
     record.createdAt ||
@@ -177,12 +186,115 @@ function normalizeSession(record) {
 
   return {
     sessionId: record.sessionId || record.session_id,
+    ownerUserId: record.ownerUserId || record.owner_user_id,
     baseline: record.baseline ?? null,
     scenarioResults: record.scenarioResults || record.scenario_results || [],
     comparison: record.comparison ?? null,
     createdAt: created || new Date().toISOString(),
     updatedAt: updated || new Date().toISOString()
   };
+}
+
+function base64UrlEncode(input) {
+  const value = typeof input === "string" ? Buffer.from(input) : input;
+  return value
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function base64UrlDecode(input) {
+  const padded = input + "===".slice((input.length + 3) % 4);
+  const base64 = padded.replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(base64, "base64").toString("utf8");
+}
+
+function signToken(payload) {
+  const payloadEncoded = base64UrlEncode(JSON.stringify(payload));
+  const signature = base64UrlEncode(
+    crypto.createHmac("sha256", authSecret).update(payloadEncoded).digest()
+  );
+  return `${payloadEncoded}.${signature}`;
+}
+
+function verifyToken(token) {
+  if (!token || typeof token !== "string") {
+    return null;
+  }
+
+  const [payloadEncoded, signature] = token.split(".");
+  if (!payloadEncoded || !signature) {
+    return null;
+  }
+
+  const expectedSignature = base64UrlEncode(
+    crypto.createHmac("sha256", authSecret).update(payloadEncoded).digest()
+  );
+  const signatureBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expectedSignature);
+  if (
+    signatureBuffer.length !== expectedBuffer.length ||
+    !crypto.timingSafeEqual(signatureBuffer, expectedBuffer)
+  ) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(base64UrlDecode(payloadEncoded));
+    if (!payload || typeof payload !== "object") {
+      return null;
+    }
+    if (typeof payload.uid !== "string" || !payload.uid) {
+      return null;
+    }
+    if (typeof payload.exp !== "number" || Date.now() >= payload.exp * 1000) {
+      return null;
+    }
+    return payload;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function createAuthPayload(userId) {
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const expiresAt = issuedAt + authTokenTtlSeconds;
+  const payload = {
+    uid: userId,
+    iat: issuedAt,
+    exp: expiresAt
+  };
+  return {
+    payload,
+    token: signToken(payload),
+    expiresAt: new Date(expiresAt * 1000).toISOString()
+  };
+}
+
+function requireAuth(req, res, next) {
+  const authHeader = req.headers.authorization || "";
+  const [scheme, token] = authHeader.split(" ");
+  if (scheme !== "Bearer" || !token) {
+    return res.status(401).json({
+      code: "UNAUTHORIZED",
+      message: "Missing bearer token"
+    });
+  }
+
+  const payload = verifyToken(token);
+  if (!payload) {
+    return res.status(401).json({
+      code: "UNAUTHORIZED",
+      message: "Invalid or expired token"
+    });
+  }
+
+  req.auth = {
+    userId: payload.uid,
+    expiresAt: new Date(payload.exp * 1000).toISOString()
+  };
+  return next();
 }
 
 function createMemoryStorage(kind = "memory") {
@@ -194,11 +306,16 @@ function createMemoryStorage(kind = "memory") {
     async ping() {
       return { ok: true };
     },
-    async saveBaseline(sessionId, baseline) {
+    async saveBaseline(ownerUserId, sessionId, baseline) {
       const existing = sessions.get(sessionId);
+      if (existing && existing.ownerUserId !== ownerUserId) {
+        throw ownershipError();
+      }
+
       const now = new Date().toISOString();
       sessions.set(sessionId, {
         sessionId,
+        ownerUserId,
         baseline,
         scenarioResults: existing?.scenarioResults || [],
         comparison: existing?.comparison || null,
@@ -206,11 +323,16 @@ function createMemoryStorage(kind = "memory") {
         updatedAt: now
       });
     },
-    async saveScenarioResults(sessionId, baseline, scenarioResults) {
+    async saveScenarioResults(ownerUserId, sessionId, baseline, scenarioResults) {
       const existing = sessions.get(sessionId);
+      if (existing && existing.ownerUserId !== ownerUserId) {
+        throw ownershipError();
+      }
+
       const now = new Date().toISOString();
       sessions.set(sessionId, {
         sessionId,
+        ownerUserId,
         baseline: baseline || existing?.baseline || null,
         scenarioResults: Array.isArray(scenarioResults) ? scenarioResults : [],
         comparison: existing?.comparison || null,
@@ -218,11 +340,16 @@ function createMemoryStorage(kind = "memory") {
         updatedAt: now
       });
     },
-    async saveComparison(sessionId, baseline, scenarioResults, comparison) {
+    async saveComparison(ownerUserId, sessionId, baseline, scenarioResults, comparison) {
       const existing = sessions.get(sessionId);
+      if (existing && existing.ownerUserId !== ownerUserId) {
+        throw ownershipError();
+      }
+
       const now = new Date().toISOString();
       sessions.set(sessionId, {
         sessionId,
+        ownerUserId,
         baseline: baseline || existing?.baseline || null,
         scenarioResults:
           (Array.isArray(scenarioResults) && scenarioResults) ||
@@ -233,11 +360,19 @@ function createMemoryStorage(kind = "memory") {
         updatedAt: now
       });
     },
-    async getSession(sessionId) {
-      return sessions.get(sessionId) || null;
+    async getSession(ownerUserId, sessionId) {
+      const session = sessions.get(sessionId);
+      if (!session) {
+        return null;
+      }
+      if (session.ownerUserId !== ownerUserId) {
+        return null;
+      }
+      return session;
     },
-    async listSessions(limit = 20) {
+    async listSessions(ownerUserId, limit = 20) {
       return Array.from(sessions.values())
+        .filter((session) => session.ownerUserId === ownerUserId)
         .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
         .slice(0, limit);
     }
@@ -256,6 +391,7 @@ function createPostgresStorage() {
       await pool.query(`
         CREATE TABLE IF NOT EXISTS twin_sessions (
           session_id TEXT PRIMARY KEY,
+          owner_user_id TEXT NOT NULL,
           baseline JSONB NOT NULL,
           scenario_results JSONB NOT NULL DEFAULT '[]'::jsonb,
           comparison JSONB,
@@ -265,69 +401,104 @@ function createPostgresStorage() {
       `);
 
       await pool.query(`
-        CREATE INDEX IF NOT EXISTS idx_twin_sessions_updated_at
-        ON twin_sessions(updated_at DESC)
+        ALTER TABLE twin_sessions
+        ADD COLUMN IF NOT EXISTS owner_user_id TEXT
+      `);
+
+      await pool.query(`
+        UPDATE twin_sessions
+        SET owner_user_id = 'legacy'
+        WHERE owner_user_id IS NULL
+      `);
+
+      await pool.query(`
+        ALTER TABLE twin_sessions
+        ALTER COLUMN owner_user_id SET NOT NULL
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_twin_sessions_owner_updated
+        ON twin_sessions(owner_user_id, updated_at DESC)
       `);
     },
     async ping() {
       await pool.query("SELECT 1");
       return { ok: true };
     },
-    async saveBaseline(sessionId, baseline) {
-      await pool.query(
+    async saveBaseline(ownerUserId, sessionId, baseline) {
+      const result = await pool.query(
         `
-        INSERT INTO twin_sessions (session_id, baseline)
-        VALUES ($1, $2::jsonb)
+        INSERT INTO twin_sessions (session_id, owner_user_id, baseline)
+        VALUES ($1, $2, $3::jsonb)
         ON CONFLICT (session_id)
         DO UPDATE SET
           baseline = EXCLUDED.baseline,
           updated_at = NOW()
+        WHERE twin_sessions.owner_user_id = EXCLUDED.owner_user_id
+        RETURNING session_id
       `,
-        [sessionId, JSON.stringify(baseline)]
+        [sessionId, ownerUserId, JSON.stringify(baseline)]
       );
+
+      if (result.rowCount === 0) {
+        throw ownershipError();
+      }
     },
-    async saveScenarioResults(sessionId, baseline, scenarioResults) {
-      await pool.query(
+    async saveScenarioResults(ownerUserId, sessionId, baseline, scenarioResults) {
+      const result = await pool.query(
         `
-        INSERT INTO twin_sessions (session_id, baseline, scenario_results)
-        VALUES ($1, $2::jsonb, $3::jsonb)
+        INSERT INTO twin_sessions (session_id, owner_user_id, baseline, scenario_results)
+        VALUES ($1, $2, $3::jsonb, $4::jsonb)
         ON CONFLICT (session_id)
         DO UPDATE SET
           baseline = EXCLUDED.baseline,
           scenario_results = EXCLUDED.scenario_results,
           updated_at = NOW()
+        WHERE twin_sessions.owner_user_id = EXCLUDED.owner_user_id
+        RETURNING session_id
       `,
-        [sessionId, JSON.stringify(baseline || {}), JSON.stringify(scenarioResults || [])]
+        [sessionId, ownerUserId, JSON.stringify(baseline || {}), JSON.stringify(scenarioResults || [])]
       );
+
+      if (result.rowCount === 0) {
+        throw ownershipError();
+      }
     },
-    async saveComparison(sessionId, baseline, scenarioResults, comparison) {
-      await pool.query(
+    async saveComparison(ownerUserId, sessionId, baseline, scenarioResults, comparison) {
+      const result = await pool.query(
         `
-        INSERT INTO twin_sessions (session_id, baseline, scenario_results, comparison)
-        VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb)
+        INSERT INTO twin_sessions (session_id, owner_user_id, baseline, scenario_results, comparison)
+        VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb)
         ON CONFLICT (session_id)
         DO UPDATE SET
           baseline = EXCLUDED.baseline,
           scenario_results = EXCLUDED.scenario_results,
           comparison = EXCLUDED.comparison,
           updated_at = NOW()
+        WHERE twin_sessions.owner_user_id = EXCLUDED.owner_user_id
+        RETURNING session_id
       `,
         [
           sessionId,
+          ownerUserId,
           JSON.stringify(baseline || {}),
           JSON.stringify(scenarioResults || []),
           JSON.stringify(comparison || null)
         ]
       );
+
+      if (result.rowCount === 0) {
+        throw ownershipError();
+      }
     },
-    async getSession(sessionId) {
+    async getSession(ownerUserId, sessionId) {
       const result = await pool.query(
         `
-        SELECT session_id, baseline, scenario_results, comparison, created_at, updated_at
+        SELECT session_id, owner_user_id, baseline, scenario_results, comparison, created_at, updated_at
         FROM twin_sessions
-        WHERE session_id = $1
+        WHERE session_id = $1 AND owner_user_id = $2
       `,
-        [sessionId]
+        [sessionId, ownerUserId]
       );
 
       if (result.rowCount === 0) {
@@ -336,15 +507,16 @@ function createPostgresStorage() {
 
       return normalizeSession(result.rows[0]);
     },
-    async listSessions(limit = 20) {
+    async listSessions(ownerUserId, limit = 20) {
       const result = await pool.query(
         `
-        SELECT session_id, baseline, scenario_results, comparison, created_at, updated_at
+        SELECT session_id, owner_user_id, baseline, scenario_results, comparison, created_at, updated_at
         FROM twin_sessions
+        WHERE owner_user_id = $1
         ORDER BY updated_at DESC
-        LIMIT $1
+        LIMIT $2
       `,
-        [limit]
+        [ownerUserId, limit]
       );
 
       return result.rows.map((row) => normalizeSession(row));
@@ -373,7 +545,7 @@ app.get("/health", async (_req, res) => {
   let storageOk = true;
   try {
     await storage.ping();
-  } catch (error) {
+  } catch (_error) {
     storageOk = false;
   }
 
@@ -387,8 +559,31 @@ app.get("/", (_req, res) => {
   res.json({
     ok: true,
     service: "digital-twin-api",
-    version: "0.2.0",
+    version: "0.3.0",
     storage: storage.kind
+  });
+});
+
+app.post("/v1/auth/guest", (_req, res) => {
+  const userId = makeId("user");
+  const auth = createAuthPayload(userId);
+  return res.json({
+    token: auth.token,
+    expiresAt: auth.expiresAt,
+    user: {
+      userId,
+      type: "guest"
+    }
+  });
+});
+
+app.get("/v1/auth/me", requireAuth, (req, res) => {
+  return res.json({
+    user: {
+      userId: req.auth.userId,
+      type: "guest"
+    },
+    expiresAt: req.auth.expiresAt
   });
 });
 
@@ -396,7 +591,7 @@ app.get("/v1/disclaimer", (_req, res) => {
   res.json({ text: DISCLAIMER });
 });
 
-app.post("/v1/baseline", async (req, res) => {
+app.post("/v1/baseline", requireAuth, async (req, res) => {
   try {
     const input = req.body;
     const validation = validateInput(input);
@@ -409,10 +604,12 @@ app.post("/v1/baseline", async (req, res) => {
     }
 
     const { relativeScore, factorScores } = computeScore(input);
-    const sessionId = typeof req.body?.sessionId === "string" ? req.body.sessionId : makeId("sess");
+    const sessionId = makeId("sess");
+    const ownerUserId = req.auth.userId;
 
     const baselinePayload = {
       sessionId,
+      ownerUserId,
       baselineId: makeId("base"),
       input,
       relativeScore,
@@ -422,10 +619,16 @@ app.post("/v1/baseline", async (req, res) => {
       disclaimer: DISCLAIMER
     };
 
-    await storage.saveBaseline(sessionId, baselinePayload);
+    await storage.saveBaseline(ownerUserId, sessionId, baselinePayload);
     return res.json(baselinePayload);
   } catch (error) {
     console.error(error);
+    if (error.code === "OWNERSHIP_MISMATCH") {
+      return res.status(403).json({
+        code: "FORBIDDEN",
+        message: "Session ownership mismatch"
+      });
+    }
     return res.status(500).json({
       code: "INTERNAL_ERROR",
       message: "Failed to generate baseline"
@@ -433,18 +636,27 @@ app.post("/v1/baseline", async (req, res) => {
   }
 });
 
-app.post("/v1/scenarios/run", async (req, res) => {
+app.post("/v1/scenarios/run", requireAuth, async (req, res) => {
   try {
     const { baseline, scenarios } = req.body || {};
     if (
       !baseline ||
       typeof baseline !== "object" ||
       !baseline.input ||
+      !baseline.sessionId ||
       !Array.isArray(scenarios)
     ) {
       return res.status(400).json({
         code: "VALIDATION_ERROR",
-        message: "Request must include baseline and scenarios[]"
+        message: "Request must include baseline (with sessionId) and scenarios[]"
+      });
+    }
+
+    const ownerUserId = req.auth.userId;
+    if (baseline.ownerUserId && baseline.ownerUserId !== ownerUserId) {
+      return res.status(403).json({
+        code: "FORBIDDEN",
+        message: "Baseline does not belong to this user"
       });
     }
 
@@ -479,13 +691,16 @@ app.post("/v1/scenarios/run", async (req, res) => {
       };
     });
 
-    if (baseline.sessionId) {
-      await storage.saveScenarioResults(baseline.sessionId, baseline, results);
-    }
-
+    await storage.saveScenarioResults(ownerUserId, baseline.sessionId, baseline, results);
     return res.json(results);
   } catch (error) {
     console.error(error);
+    if (error.code === "OWNERSHIP_MISMATCH") {
+      return res.status(403).json({
+        code: "FORBIDDEN",
+        message: "Session ownership mismatch"
+      });
+    }
     return res.status(500).json({
       code: "INTERNAL_ERROR",
       message: "Failed to run scenarios"
@@ -493,13 +708,26 @@ app.post("/v1/scenarios/run", async (req, res) => {
   }
 });
 
-app.post("/v1/scenarios/compare", async (req, res) => {
+app.post("/v1/scenarios/compare", requireAuth, async (req, res) => {
   try {
     const { baseline, scenarioResults } = req.body || {};
-    if (!baseline || typeof baseline !== "object" || !Array.isArray(scenarioResults)) {
+    if (
+      !baseline ||
+      typeof baseline !== "object" ||
+      !baseline.sessionId ||
+      !Array.isArray(scenarioResults)
+    ) {
       return res.status(400).json({
         code: "VALIDATION_ERROR",
-        message: "Request must include baseline and scenarioResults[]"
+        message: "Request must include baseline (with sessionId) and scenarioResults[]"
+      });
+    }
+
+    const ownerUserId = req.auth.userId;
+    if (baseline.ownerUserId && baseline.ownerUserId !== ownerUserId) {
+      return res.status(403).json({
+        code: "FORBIDDEN",
+        message: "Baseline does not belong to this user"
       });
     }
 
@@ -529,18 +757,23 @@ app.post("/v1/scenarios/compare", async (req, res) => {
       disclaimer: DISCLAIMER
     };
 
-    if (baseline.sessionId) {
-      await storage.saveComparison(
-        baseline.sessionId,
-        baseline,
-        scenarioResults,
-        comparePayload
-      );
-    }
+    await storage.saveComparison(
+      ownerUserId,
+      baseline.sessionId,
+      baseline,
+      scenarioResults,
+      comparePayload
+    );
 
     return res.json(comparePayload);
   } catch (error) {
     console.error(error);
+    if (error.code === "OWNERSHIP_MISMATCH") {
+      return res.status(403).json({
+        code: "FORBIDDEN",
+        message: "Session ownership mismatch"
+      });
+    }
     return res.status(500).json({
       code: "INTERNAL_ERROR",
       message: "Failed to compare scenarios"
@@ -548,11 +781,11 @@ app.post("/v1/scenarios/compare", async (req, res) => {
   }
 });
 
-app.get("/v1/sessions", async (req, res) => {
+app.get("/v1/sessions", requireAuth, async (req, res) => {
   try {
     const parsedLimit = Number(req.query.limit || 20);
     const limit = Number.isFinite(parsedLimit) ? clamp(parsedLimit, 1, 100) : 20;
-    const sessions = await storage.listSessions(limit);
+    const sessions = await storage.listSessions(req.auth.userId, limit);
 
     const items = sessions.map((session) => ({
       sessionId: session.sessionId,
@@ -577,10 +810,10 @@ app.get("/v1/sessions", async (req, res) => {
   }
 });
 
-app.get("/v1/sessions/:sessionId", async (req, res) => {
+app.get("/v1/sessions/:sessionId", requireAuth, async (req, res) => {
   try {
     const { sessionId } = req.params;
-    const session = await storage.getSession(sessionId);
+    const session = await storage.getSession(req.auth.userId, sessionId);
     if (!session) {
       return res.status(404).json({
         code: "NOT_FOUND",

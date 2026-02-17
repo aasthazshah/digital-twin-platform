@@ -5,12 +5,21 @@ Railway-targeted API service for baseline and scenario simulation endpoints.
 ## Endpoints
 
 - `GET /health`
+- `POST /v1/auth/guest`
+- `GET /v1/auth/me`
 - `GET /v1/disclaimer`
 - `POST /v1/baseline`
 - `POST /v1/scenarios/run`
 - `POST /v1/scenarios/compare`
 - `GET /v1/sessions?limit=10`
 - `GET /v1/sessions/:sessionId`
+
+Auth notes:
+
+- The API uses a lightweight guest bearer token flow.
+- Call `POST /v1/auth/guest` once and store `token`.
+- Send `Authorization: Bearer <token>` for baseline/scenario/session endpoints.
+- Sessions are scoped to token `userId`; cross-user session access is blocked.
 
 ## Environment
 
@@ -20,3 +29,5 @@ Copy `apps/api/.env.example` to `.env` and set:
 - `CORS_ORIGIN`
 - `DATABASE_URL` (optional, for PostgreSQL persistence)
 - `DATABASE_SSL` (`true` only if your DB requires SSL)
+- `AUTH_SECRET` (required outside local development)
+- `AUTH_TOKEN_TTL_SECONDS` (token expiry in seconds)
