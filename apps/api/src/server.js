@@ -7,7 +7,13 @@ const corsOrigin = process.env.CORS_ORIGIN || "*";
 
 app.use(
   cors({
-    origin: corsOrigin === "*" ? true : corsOrigin
+    origin:
+      corsOrigin === "*"
+        ? true
+        : corsOrigin
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean)
   })
 );
 app.use(express.json());
@@ -79,6 +85,13 @@ function sleepFactor(sleepHours) {
 }
 
 function validateInput(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return {
+      valid: false,
+      errors: [{ field: "input", message: "Input must be a JSON object" }]
+    };
+  }
+
   const required = [
     "ageRange",
     "bodyCategory",
@@ -145,6 +158,10 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
+app.get("/", (_req, res) => {
+  res.json({ ok: true, service: "digital-twin-api", version: "0.1.0" });
+});
+
 app.get("/v1/disclaimer", (_req, res) => {
   res.json({ text: DISCLAIMER });
 });
@@ -174,7 +191,12 @@ app.post("/v1/baseline", (req, res) => {
 
 app.post("/v1/scenarios/run", (req, res) => {
   const { baseline, scenarios } = req.body || {};
-  if (!baseline || !baseline.input || !Array.isArray(scenarios)) {
+  if (
+    !baseline ||
+    typeof baseline !== "object" ||
+    !baseline.input ||
+    !Array.isArray(scenarios)
+  ) {
     return res.status(400).json({
       code: "VALIDATION_ERROR",
       message: "Request must include baseline and scenarios[]"
@@ -217,7 +239,7 @@ app.post("/v1/scenarios/run", (req, res) => {
 
 app.post("/v1/scenarios/compare", (req, res) => {
   const { baseline, scenarioResults } = req.body || {};
-  if (!baseline || !Array.isArray(scenarioResults)) {
+  if (!baseline || typeof baseline !== "object" || !Array.isArray(scenarioResults)) {
     return res.status(400).json({
       code: "VALIDATION_ERROR",
       message: "Request must include baseline and scenarioResults[]"
@@ -249,4 +271,3 @@ app.post("/v1/scenarios/compare", (req, res) => {
 app.listen(port, () => {
   console.log(`API running on port ${port}`);
 });
-
