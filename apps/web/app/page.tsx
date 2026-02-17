@@ -152,11 +152,69 @@ export default function Home() {
   const [loadingRecent, setLoadingRecent] = useState(false);
   const [loadingSessionId, setLoadingSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [resultsView, setResultsView] = useState<"table" | "charts" | "both">("both");
 
   const scenarioCountText = useMemo(
     () => `${scenarios.length} scenario${scenarios.length === 1 ? "" : "s"} ready`,
     [scenarios.length]
   );
+
+  const numericScenarioRows = useMemo(
+    () =>
+      scenarioResults
+        .filter(
+          (row) =>
+            typeof row.relativeScore === "number" &&
+            Number.isFinite(row.relativeScore) &&
+            typeof row.deltaFromBaseline === "number" &&
+            Number.isFinite(row.deltaFromBaseline)
+        )
+        .map((row) => ({
+          scenarioId: row.scenarioId,
+          scenarioName: row.scenarioName,
+          relativeScore: row.relativeScore,
+          deltaFromBaseline: row.deltaFromBaseline,
+          trendDirection: row.trendDirection
+        })),
+    [scenarioResults]
+  );
+
+  const scoreBounds = useMemo(() => {
+    const values: number[] = [];
+    if (baseline && Number.isFinite(baseline.relativeScore)) {
+      values.push(baseline.relativeScore);
+    }
+    for (const row of numericScenarioRows) {
+      values.push(row.relativeScore);
+    }
+    if (values.length === 0) {
+      return null;
+    }
+
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const spread = max - min;
+    return {
+      min,
+      max,
+      spread: spread === 0 ? 1 : spread
+    };
+  }, [baseline, numericScenarioRows]);
+
+  const baselineScorePosition = useMemo(() => {
+    if (!baseline || !scoreBounds) {
+      return null;
+    }
+    const raw = ((baseline.relativeScore - scoreBounds.min) / scoreBounds.spread) * 100;
+    return Math.max(0, Math.min(100, raw));
+  }, [baseline, scoreBounds]);
+
+  const maxAbsDelta = useMemo(() => {
+    if (numericScenarioRows.length === 0) {
+      return 1;
+    }
+    return Math.max(1, ...numericScenarioRows.map((row) => Math.abs(row.deltaFromBaseline)));
+  }, [numericScenarioRows]);
 
   useEffect(() => {
     void bootstrapAuth(false);
@@ -792,35 +850,156 @@ export default function Home() {
 
       {scenarioResults.length > 0 ? (
         <section className="card">
-          <h2>4) Scenario Results</h2>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Score</th>
-                  <th>Delta</th>
-                  <th>Deviation %</th>
-                  <th>Trend</th>
-                </tr>
-              </thead>
-              <tbody>
-                {scenarioResults.map((row) => (
-                  <tr key={row.scenarioId}>
-                    <td>{row.scenarioName}</td>
-                    <td>{typeof row.relativeScore === "number" ? row.relativeScore : "-"}</td>
-                    <td>
-                      {typeof row.deltaFromBaseline === "number" ? row.deltaFromBaseline : "-"}
-                    </td>
-                    <td>
-                      {typeof row.deviationPercent === "number" ? row.deviationPercent : "-"}
-                    </td>
-                    <td className="cap">{row.trendDirection || "error"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="section-head">
+            <h2>4) Scenario Results</h2>
+            <div className="view-toggle" role="group" aria-label="Scenario results view mode">
+              <button
+                type="button"
+                className={`view-toggle-btn${resultsView === "table" ? " active" : ""}`}
+                onClick={() => setResultsView("table")}
+              >
+                Table
+              </button>
+              <button
+                type="button"
+                className={`view-toggle-btn${resultsView === "charts" ? " active" : ""}`}
+                onClick={() => setResultsView("charts")}
+              >
+                Charts
+              </button>
+              <button
+                type="button"
+                className={`view-toggle-btn${resultsView === "both" ? " active" : ""}`}
+                onClick={() => setResultsView("both")}
+              >
+                Both
+              </button>
+            </div>
           </div>
+
+          {resultsView !== "charts" ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Score</th>
+                    <th>Delta</th>
+                    <th>Deviation %</th>
+                    <th>Trend</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {scenarioResults.map((row) => (
+                    <tr key={row.scenarioId}>
+                      <td>{row.scenarioName}</td>
+                      <td>{typeof row.relativeScore === "number" ? row.relativeScore : "-"}</td>
+                      <td>
+                        {typeof row.deltaFromBaseline === "number" ? row.deltaFromBaseline : "-"}
+                      </td>
+                      <td>
+                        {typeof row.deviationPercent === "number" ? row.deviationPercent : "-"}
+                      </td>
+                      <td className="cap">{row.trendDirection || "error"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+
+          {resultsView !== "table" && numericScenarioRows.length > 0 && scoreBounds ? (
+            <div className="scenario-visuals">
+              <h3 className="viz-title">Visual Comparison</h3>
+
+              <div className="viz-card">
+                <p className="label">Relative Score (with baseline marker)</p>
+                {numericScenarioRows.map((row) => {
+                  const widthRaw =
+                    ((row.relativeScore - scoreBounds.min) / scoreBounds.spread) * 100;
+                  const width = Math.max(0, Math.min(100, widthRaw));
+
+                  return (
+                    <div key={`${row.scenarioId}-score`} className="score-row">
+                      <div className="score-head">
+                        <span>{row.scenarioName}</span>
+                        <span>{row.relativeScore.toFixed(1)}</span>
+                      </div>
+                      <div className="score-track">
+                        {baselineScorePosition !== null ? (
+                          <span
+                            className="baseline-line"
+                            style={{ left: `${baselineScorePosition}%` }}
+                            aria-hidden
+                          />
+                        ) : null}
+                        <span
+                          className={`score-fill ${row.trendDirection}`}
+                          style={{ width: `${width}%` }}
+                          aria-hidden
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+                <div className="score-scale">
+                  <span>{scoreBounds.min.toFixed(1)}</span>
+                  <span>{scoreBounds.max.toFixed(1)}</span>
+                </div>
+                <p className="viz-hint">
+                  Baseline marker: {baseline ? baseline.relativeScore.toFixed(1) : "-"}
+                </p>
+              </div>
+
+              <div className="viz-card">
+                <p className="label">Delta From Baseline</p>
+                {numericScenarioRows.map((row) => {
+                  const width = Math.min(
+                    100,
+                    (Math.abs(row.deltaFromBaseline) / maxAbsDelta) * 100
+                  );
+
+                  return (
+                    <div key={`${row.scenarioId}-delta`} className="delta-row">
+                      <div className="score-head">
+                        <span>{row.scenarioName}</span>
+                        <span>{row.deltaFromBaseline > 0 ? "+" : ""}{row.deltaFromBaseline.toFixed(1)}</span>
+                      </div>
+                      <div className="delta-track">
+                        <span className="delta-zero" aria-hidden />
+                        {row.deltaFromBaseline > 0 ? (
+                          <span
+                            className="delta-bar positive"
+                            style={{ width: `${width}%` }}
+                            aria-hidden
+                          />
+                        ) : null}
+                        {row.deltaFromBaseline < 0 ? (
+                          <span
+                            className="delta-bar negative"
+                            style={{ width: `${width}%` }}
+                            aria-hidden
+                          />
+                        ) : null}
+                        {row.deltaFromBaseline === 0 ? (
+                          <span className="delta-dot" aria-hidden />
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })}
+                <div className="delta-scale">
+                  <span>-{maxAbsDelta.toFixed(1)}</span>
+                  <span>0</span>
+                  <span>+{maxAbsDelta.toFixed(1)}</span>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {resultsView !== "table" && !(numericScenarioRows.length > 0 && scoreBounds) ? (
+            <p className="subtitle">Chart view is available after numeric scenario results load.</p>
+          ) : null}
         </section>
       ) : null}
 
