@@ -1,8 +1,4 @@
-node_modules
-.git
-.next
-.turbo
-coverage
-dist
-**/__pycache__
-**/*.pyc
+*
+!apps/
+!apps/api/
+!apps/api/**

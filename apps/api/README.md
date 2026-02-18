@@ -53,6 +53,7 @@ Railway service settings:
 - Dockerfile Path: `apps/api/Dockerfile`
 - Start Command: leave empty (Docker `CMD` is used)
 - Build Command: leave empty
+- Note: `.dockerignore` is configured to send only `apps/api` into build context for faster deploys.
 
 ## Environment
 
