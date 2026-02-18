@@ -5,10 +5,11 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY requirements.txt ./
+# Build context is repo root in Railway, so copy from apps/api
+COPY apps/api/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY apps/api/ .
 
 EXPOSE 4000
 

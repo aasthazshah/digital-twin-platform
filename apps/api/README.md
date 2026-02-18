@@ -48,8 +48,9 @@ Use Docker deployment for the API service to avoid Node/Python runtime conflicts
 
 Railway service settings:
 
-- Root Directory: `apps/api`
-- Builder: `Dockerfile`
+- Root Directory: repo root (leave empty)
+- Builder: Docker
+- Dockerfile Path: `apps/api/Dockerfile`
 - Start Command: leave empty (Docker `CMD` is used)
 - Build Command: leave empty
 
