@@ -39,7 +39,7 @@ pip install -r requirements.txt
 Start API:
 
 ```bash
-python run.py
+python3 run.py
 ```
 
 ## Environment
