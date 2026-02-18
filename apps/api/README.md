@@ -42,6 +42,17 @@ Start API:
 python3 run.py
 ```
 
+## Railway (Recommended)
+
+Use Docker deployment for the API service to avoid Node/Python runtime conflicts.
+
+Railway service settings:
+
+- Root Directory: `apps/api`
+- Builder: `Dockerfile`
+- Start Command: leave empty (Docker `CMD` is used)
+- Build Command: leave empty
+
 ## Environment
 
 Copy `apps/api/.env.example` to `.env` and set:
