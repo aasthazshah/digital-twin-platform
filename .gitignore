@@ -9,3 +9,5 @@ coverage/
 .turbo/
 .vscode/
 *.log
+__pycache__/
+*.pyc

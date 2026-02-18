@@ -1,6 +1,6 @@
 # API Service (`apps/api`)
 
-Railway-targeted API service for baseline and scenario simulation endpoints.
+Railway-targeted Python (FastAPI) service for baseline and scenario simulation endpoints.
 
 ## Endpoints
 
@@ -27,6 +27,20 @@ Auth notes:
 - Sessions are scoped to token `userId`; cross-user session access is blocked.
 - If token is lost/expired, call `POST /v1/auth/recover` with `publicIdentityId + recoveryKey`.
 - Use `POST /v1/auth/recovery-key/rotate` to replace the recovery key.
+
+## Local Run
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Start API:
+
+```bash
+python run.py
+```
 
 ## Environment
 
